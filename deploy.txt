@@ -1,1 +1,2 @@
 force redeploy with smtp 2026-11-17T11:12:04Z
+force redeploy: telegram link code + build marker 2026-11-17T15:12:00Z

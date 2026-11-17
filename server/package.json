@@ -1,6 +1,6 @@
 {
   "name": "safetrail-server",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "SafeTrail backend — travel safety platform",
   "main": "index.js",
   "type": "module",

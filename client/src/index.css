@@ -1,0 +1,116 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html {
+    font-family: 'Inter', sans-serif;
+    -webkit-font-smoothing: antialiased;
+    scroll-behavior: smooth;
+  }
+
+  h1, h2, h3, h4, h5, h6, .font-display {
+    font-family: 'DM Sans', sans-serif;
+  }
+
+  * {
+    box-sizing: border-box;
+  }
+
+  /* Leaflet map z-index fix */
+  .leaflet-container {
+    z-index: 0;
+  }
+}
+
+@layer components {
+  /* Primary button */
+  .btn-primary {
+    @apply bg-shield-600 hover:bg-shield-700 text-white font-semibold
+           px-5 py-2.5 rounded-xl transition-all duration-150
+           focus:outline-none focus:ring-2 focus:ring-shield-400 focus:ring-offset-2
+           disabled:opacity-50 disabled:cursor-not-allowed active:scale-95;
+  }
+
+  /* Ghost button */
+  .btn-ghost {
+    @apply text-slate-600 hover:text-slate-900 hover:bg-slate-100
+           font-medium px-4 py-2 rounded-xl transition-all duration-150
+           focus:outline-none focus:ring-2 focus:ring-slate-300;
+  }
+
+  /* Danger button */
+  .btn-danger {
+    @apply bg-danger-500 hover:bg-danger-600 text-white font-semibold
+           px-5 py-2.5 rounded-xl transition-all duration-150
+           focus:outline-none focus:ring-2 focus:ring-danger-400 focus:ring-offset-2
+           disabled:opacity-50 disabled:cursor-not-allowed active:scale-95;
+  }
+
+  /* SOS button — large, prominent */
+  .btn-sos {
+    @apply bg-danger-500 hover:bg-danger-600 text-white font-bold
+           text-lg rounded-2xl transition-all duration-150
+           focus:outline-none focus:ring-4 focus:ring-danger-300 focus:ring-offset-2
+           active:scale-95 shadow-lg shadow-danger-200;
+  }
+
+  /* Input field */
+  .input {
+    @apply w-full border border-slate-200 rounded-xl px-4 py-2.5 text-sm text-slate-900
+           placeholder-slate-400 bg-white
+           focus:outline-none focus:ring-2 focus:ring-shield-400 focus:border-shield-400
+           transition-all duration-150;
+  }
+
+  /* Card */
+  .card {
+    @apply bg-white rounded-2xl border border-slate-100 shadow-sm;
+  }
+
+  /* Badge */
+  .badge-safe {
+    @apply inline-flex items-center gap-1 bg-safe-50 text-safe-700 text-xs font-semibold px-2.5 py-1 rounded-full;
+  }
+  .badge-warn {
+    @apply inline-flex items-center gap-1 bg-warn-50 text-warn-700 text-xs font-semibold px-2.5 py-1 rounded-full;
+  }
+  .badge-danger {
+    @apply inline-flex items-center gap-1 bg-red-50 text-danger-700 text-xs font-semibold px-2.5 py-1 rounded-full;
+  }
+
+  /* Status dot */
+  .dot-active {
+    @apply w-2 h-2 rounded-full bg-safe-500 animate-pulse;
+  }
+  .dot-overdue {
+    @apply w-2 h-2 rounded-full bg-warn-500 animate-pulse-slow;
+  }
+  .dot-sos {
+    @apply w-2 h-2 rounded-full bg-danger-500 animate-pulse;
+  }
+}
+
+/* Leaflet custom marker */
+.safetrail-marker {
+  width: 36px;
+  height: 36px;
+  border-radius: 50% 50% 50% 0;
+  transform: rotate(-45deg);
+  border: 3px solid white;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+}
+
+.safetrail-marker.active { background: #22c55e; }
+.safetrail-marker.overdue { background: #f59e0b; }
+.safetrail-marker.sos { background: #ef4444; }
+
+/* Page transitions */
+.page-enter {
+  animation: fadeUp 0.25s ease both;
+}
+
+@keyframes fadeUp {
+  from { opacity: 0; transform: translateY(10px); }
+  to   { opacity: 1; transform: translateY(0); }
+}

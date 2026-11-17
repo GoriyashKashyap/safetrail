@@ -85,7 +85,9 @@ Solo and vulnerable travellers often want someone to know where they are and tha
 - Tokenised accept link that needs no login and expires after 7 days; pending invitations can also be accepted or declined in-app.
 - Editable label (e.g. "Mom", "Best Friend") and permissions.
 - Soft removal via `status: 'removed'`.
-- `GET /api/guardians/watching` lists **everyone the user guards** together with `activeTrip` — the person's current live trip, if any — so the guardian always knows who they monitor.
+- `GET /api/guardians/watching` lists **everyone the user guards** together with `activeTrip` — the person's current live trip, if any — so the guardian always knows who they monitor. Each `activeTrip` also carries `lastLocation` (`{ lat, lng, timestamp, accuracy, battery }`), resolved from the newest GPS ping, else the SOS coordinates, else the last check-in position.
+- **Live map of everyone they guard**: the `Watching` page plots one pin per travelling person on a single Leaflet map (`components/GuardianMap.jsx`) — initials inside a status-coloured pin, an "active / overdue / SOS" legend, destination markers, per-person "Locate" and a "Fit all" reset. Pins move from `location:update` sockets without polling; the map fits once per set of people so a guardian's zoom survives the next ping.
+- `permissions.viewLiveLocation` is enforced on both the map payload (`lastLocation: null`, `canViewLocation: false`) and `GET /api/trips/:id/locations` (`403`), so switching it off actually hides positions.
 - New guardians are announced over sockets (`guardian:added`) and Telegram when they have a linked chat.
 
 ### Trips & live tracking
@@ -94,6 +96,8 @@ Solo and vulnerable travellers often want someone to know where they are and tha
 - Check-ins accept `lat`, `lng`, `note`, and `battery`; a GPS check-in also stores a `Location` record.
 - Overdue trips can be checked in again, which resets them to `active`.
 - Background location endpoint accepts accuracy, speed, heading, altitude, and battery, broadcasts to the trip room, and is accessible while `active`, `overdue`, or `sos`.
+- Location sharing is remembered in `localStorage` (`safetrail:share-location`), so a traveller who shared on an earlier trip resumes sharing when the next trip becomes active instead of leaving the guardian map empty.
+- Live maps follow the newest fix and only pan when the traveller leaves the visible area, so a 30-second ping no longer resets the viewer's zoom.
 - Trip creation only attaches the traveller's **active** guardians (optionally narrowed by `guardianIds`).
 - Every state change broadcasts a Socket.IO event to the trip room.
 
@@ -201,6 +205,7 @@ Module system is native ESM (`"type": "module"`) in both packages.
 │       │   ├── layout/            # AppShell (header + responsive nav)
 │       │   ├── ui/                # Banner, Countdown, StatusBadge, Loading/EmptyState
 │       │   ├── LiveMap.jsx        # Leaflet map with trail polyline + status marker
+│       │   ├── GuardianMap.jsx    # multi-person overview map for guardians
 │       │   └── TripCard.jsx
 │       ├── pages/                 # auth, dashboard, trips, guardians, watching, settings
 │       ├── context/               # AuthContext (session + shared socket)
@@ -329,7 +334,7 @@ Base URL: `http://localhost:5000/api`. Protected routes require `Authorization: 
 | POST | `/:id/decline` | ✅ | Signed-in guardian declines a pending invitation. |
 | PATCH | `/:id` | ✅ | Update `label` and/or `permissions` (owner only). |
 | DELETE | `/:id` | ✅ | Soft-remove guardian (`status: 'removed'`). |
-| GET | `/watching` | ✅ | Everyone I guard (`active` and any unclaimed `pending`), each with `activeTrip` — that person's live trip or `null`. |
+| GET | `/watching` | ✅ | Everyone I guard (`active` and any unclaimed `pending`), each with `activeTrip` — that person's live trip or `null` — plus `lastLocation` and `canViewLocation` for the guardian overview map. |
 
 ### Telegram — `/api/telegram`
 | Method | Path | Auth | Description |
@@ -347,7 +352,7 @@ Base URL: `http://localhost:5000/api`. Protected routes require `Authorization: 
 | GET | `/active` | ✅ | Current trip with status `active \| sos \| overdue`, or `null`. |
 | GET | `/watching` | ✅ | Trips you are an **active guardian** for, with populated traveller and your guardian label (`guardianLabel`). |
 | GET | `/:id` | ✅ | Trip with populated guardians (owner only). |
-| GET | `/:id/locations` | ✅ | Location history; allowed for the owner or an **active guardian** of that traveller. |
+| GET | `/:id/locations` | ✅ | Location history; allowed for the owner or an **active guardian** of that traveller with `viewLiveLocation` (otherwise `403`). Query `limit` (default 2000, max 5000) keeps the newest N and returns them oldest-first. |
 | POST | `/` | ✅ | Create trip: `destination.label`, `startTime`, `estimatedArrival` required; optional `title`, `origin`, `transport`, `transportRef`, `checkInInterval`, `guardianIds`. |
 | POST | `/:id/start` | ✅ | `scheduled → active`; sets `lastCheckIn` and `nextCheckInDue`; notifies guardians (`trip:started` over socket + email + Telegram). |
 | POST | `/:id/checkin` | ✅ | Body `{ lat?, lng?, note?, battery? }`; resets timer; stores a check-in (and a `Location` if coordinates given); emits `trip:checkin`. Works while `active` or `overdue`. |
@@ -418,7 +423,7 @@ Note: the user-level `settings.alertBuffer` is modelled but the watchdog does no
 
 - **Passwords:** bcrypt, cost 12, never selected by default.
 - **JWT:** signed with `JWT_SECRET`; default 7-day expiry; verified on HTTP and socket connections.
-- **Authorization:** trip reads/site actions are scoped to the owner; guardians are checked explicitly for location history, socket rooms, and nudges.
+- **Authorization:** trip reads/site actions are scoped to the owner; guardians are checked explicitly for location history, socket rooms, and nudges. Per-guardian permissions are enforced too — `viewLiveLocation: false` hides the map pin in `/guardians/watching` and answers `403` on the location endpoint.
 - **Rate limiting:** global 200 requests / 15 min per IP; auth routes 20 requests / 15 min per IP.
 - **Input validation:** `express-validator` chains on auth, guardian, and trip endpoints plus Mongoose schema validation; profile updates and guardian patches use field whitelists (no mass assignment).
 - **Headers:** `helmet` is enabled, with `contentSecurityPolicy: false` (needed for the Leaflet/font CDNs in development).

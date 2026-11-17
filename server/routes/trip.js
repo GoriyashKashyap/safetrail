@@ -129,21 +129,36 @@ router.get(
     if (!trip) return res.status(404).json({ message: 'Trip not found.' });
 
     const isOwner = trip.traveller.toString() === req.user._id.toString();
-    const isGuardian = await Guardian.findOne({
-      traveller: trip.traveller,
-      guardianUser: req.user._id,
-      status: 'active',
-    });
+    const isGuardian = isOwner
+      ? null
+      : await Guardian.findOne({
+          traveller: trip.traveller,
+          guardianUser: req.user._id,
+          status: 'active',
+        });
 
     if (!isOwner && !isGuardian) {
       return res.status(403).json({ message: 'Not authorized to view this trip.' });
     }
 
+    // viewLiveLocation is a per-guardian permission; the live map and the
+    // location history must behave the same way when it is switched off.
+    if (isGuardian && isGuardian.permissions?.viewLiveLocation === false) {
+      return res.status(403).json({
+        message: 'This traveller turned off live location sharing for guardians.',
+      });
+    }
+
+    // Bounded payload: a long trip pinging every 30 s would otherwise return
+    // thousands of rows on every page load. Newest N, then back to
+    // chronological order for the trail polyline.
+    const limit = Math.min(Math.max(Number(req.query.limit) || 2000, 1), 5000);
     const locations = await Location.find({ trip: req.params.id })
-      .sort({ timestamp: 1 })
+      .sort({ timestamp: -1 })
+      .limit(limit)
       .lean();
 
-    res.json({ locations });
+    res.json({ locations: locations.reverse() });
   })
 );
 

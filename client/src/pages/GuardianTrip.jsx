@@ -21,6 +21,7 @@ export default function GuardianTrip() {
   const [error, setError] = useState('');
   const [feedback, setFeedback] = useState(null);
   const [nudging, setNudging] = useState(false);
+  const [locationBlocked, setLocationBlocked] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -37,11 +38,18 @@ export default function GuardianTrip() {
         }
         setTrip(found);
 
-        const locRes = await api
-          .get(`/trips/${id}/locations`)
-          .catch(() => ({ data: { locations: [] } }));
-        if (cancelled) return;
-        setLocations(locRes.data.locations || []);
+        // The traveller can switch live-location sharing off per guardian; that
+        // answers 403 and must read as "turned off", not as "no data".
+        try {
+          const locRes = await api.get(`/trips/${id}/locations`);
+          if (cancelled) return;
+          setLocations(locRes.data.locations || []);
+          setLocationBlocked(false);
+        } catch (locErr) {
+          if (cancelled) return;
+          setLocations([]);
+          setLocationBlocked(locErr?.response?.status === 403);
+        }
       } catch (err) {
         if (!cancelled) setError(apiError(err, 'Could not load this trip.'));
       } finally {
@@ -152,6 +160,7 @@ export default function GuardianTrip() {
   const points = locations
     .map((entry) => entry.coordinates)
     .filter((coords) => coords && Number.isFinite(coords.lat) && Number.isFinite(coords.lng));
+  const lastFixAt = locations.length ? locations[locations.length - 1].timestamp : trip.lastCheckIn;
   const checkIns = [...(trip.checkIns || [])].reverse();
 
   return (
@@ -219,10 +228,16 @@ export default function GuardianTrip() {
             <div className="flex items-center justify-between mb-3">
               <h2 className="font-display font-semibold text-slate-900">Live map</h2>
               <span className="text-xs text-slate-400">
-                Last update {trip.lastCheckIn ? relativeTime(trip.lastCheckIn) : '—'}
+                Last update {lastFixAt ? relativeTime(lastFixAt) : '—'}
               </span>
             </div>
             <LiveMap points={points} status={trip.status} height={360} />
+            {locationBlocked && (
+              <p className="text-xs text-slate-500 mt-2">
+                {trip.traveller?.name || 'This traveller'} switched off live location sharing for guardians.
+                You still see check-ins, status changes and alerts.
+              </p>
+            )}
             {trip.status === 'sos' && points.length > 0 && (
               <a
                 href={`https://www.google.com/maps?q=${points[points.length - 1].lat},${points[points.length - 1].lng}`}

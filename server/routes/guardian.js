@@ -4,6 +4,7 @@ import { body, validationResult } from 'express-validator';
 import Guardian from '../models/Guardian.js';
 import User from '../models/User.js';
 import Trip from '../models/Trip.js';
+import Location from '../models/Location.js';
 import { protect } from '../middleware/auth.js';
 import { asyncHandler } from '../middleware/errorHandler.js';
 import { sendGuardianInviteEmail } from '../utils/email.js';
@@ -253,7 +254,10 @@ router.get(
           traveller: { $in: travellerIds },
           status: { $in: ['active', 'overdue', 'sos'] },
         })
-          .select('traveller title destination status lastCheckIn nextCheckInDue sos startTime')
+          .select(
+            'traveller title origin destination transport status startTime estimatedArrival ' +
+              'lastCheckIn nextCheckInDue sos checkInInterval checkIns'
+          )
           .lean()
       : [];
 
@@ -267,14 +271,91 @@ router.get(
       }
     }
 
+    // The overview map only needs the newest fix per traveller, so one grouped
+    // query replaces a per-trip request (and avoids shipping history).
+    const latestByTrip = new Map();
+    if (liveTrips.length) {
+      const fixes = await Location.aggregate([
+        { $match: { trip: { $in: liveTrips.map((trip) => trip._id) } } },
+        { $sort: { timestamp: -1 } },
+        {
+          $group: {
+            _id: '$trip',
+            lat: { $first: '$coordinates.lat' },
+            lng: { $first: '$coordinates.lng' },
+            timestamp: { $first: '$timestamp' },
+            accuracy: { $first: '$accuracy' },
+            battery: { $first: '$battery' },
+          },
+        },
+      ]);
+      for (const fix of fixes) latestByTrip.set(String(fix._id), fix);
+    }
+
+    /**
+     * Three sources can hold a position, newest first: a background GPS ping,
+     * the coordinates captured by an SOS, and the coordinates attached to a
+     * manual check-in (someone can check in with GPS without ever enabling
+     * continuous sharing, and the map should still show them).
+     */
+    const lastPosition = (trip) => {
+      const fix = latestByTrip.get(String(trip._id));
+      if (fix && Number.isFinite(fix.lat) && Number.isFinite(fix.lng)) {
+        return {
+          lat: fix.lat,
+          lng: fix.lng,
+          timestamp: fix.timestamp,
+          accuracy: fix.accuracy ?? null,
+          battery: fix.battery ?? null,
+        };
+      }
+      if (Number.isFinite(trip.sos?.lat) && Number.isFinite(trip.sos?.lng)) {
+        return {
+          lat: trip.sos.lat,
+          lng: trip.sos.lng,
+          timestamp: trip.sos.triggeredAt,
+          accuracy: null,
+          battery: null,
+        };
+      }
+      const checkIn = [...(trip.checkIns || [])]
+        .reverse()
+        .find((entry) => Number.isFinite(entry.lat) && Number.isFinite(entry.lng));
+      if (checkIn) {
+        return {
+          lat: checkIn.lat,
+          lng: checkIn.lng,
+          timestamp: checkIn.confirmedAt,
+          accuracy: null,
+          battery: null,
+        };
+      }
+      return null;
+    };
+
     res.json({
-      guardianships: guardianships.map((guardian) => ({
-        ...guardian.toObject(),
-        activeTrip:
+      guardianships: guardianships.map((guardian) => {
+        const trip =
           guardian.status === 'active'
             ? tripByTraveller.get(String(guardian.traveller?._id)) || null
+            : null;
+
+        // viewLiveLocation is a per-guardian permission the traveller controls,
+        // so the map must hide the pin (not just the history endpoint).
+        const canViewLocation = guardian.permissions?.viewLiveLocation !== false;
+        const { checkIns, ...tripFields } = trip || {};
+
+        return {
+          ...guardian.toObject(),
+          canViewLocation,
+          activeTrip: trip
+            ? {
+                ...tripFields,
+                lastLocation: canViewLocation ? lastPosition(trip) : null,
+              }
             : null,
-      })),
+        };
+      }),
     });
   })
 );

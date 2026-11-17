@@ -21,6 +21,24 @@ import StatusBadge from '../components/ui/StatusBadge.jsx';
 import { PageLoader, Spinner } from '../components/ui/Loading.jsx';
 import { formatDateTime, formatTime, isActiveStatus } from '../utils/format.js';
 
+const SHARE_PREF_KEY = 'safetrail:share-location';
+
+const readSharePreference = () => {
+  try {
+    return window.localStorage.getItem(SHARE_PREF_KEY) === '1';
+  } catch {
+    return false;
+  }
+};
+
+const writeSharePreference = (value) => {
+  try {
+    window.localStorage.setItem(SHARE_PREF_KEY, value ? '1' : '0');
+  } catch {
+    // Private browsing: the choice simply is not remembered.
+  }
+};
+
 export default function TripDetail() {
   const { id } = useParams();
   const { socket } = useAuth();
@@ -33,8 +51,17 @@ export default function TripDetail() {
   const [feedback, setFeedback] = useState(null);
   const [note, setNote] = useState('');
   const [busy, setBusy] = useState('');
-  const [sharing, setSharing] = useState(false);
+  // Sharing is remembered between trips: someone who let their guardians
+  // follow them last time almost certainly wants the same on the next trip,
+  // and without this the live map stayed empty until the button was found.
+  const [sharing, setSharing] = useState(() => readSharePreference());
   const [confirmSos, setConfirmSos] = useState(false);
+
+  const toggleSharing = () =>
+    setSharing((value) => {
+      writeSharePreference(!value);
+      return !value;
+    });
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -325,7 +352,7 @@ export default function TripDetail() {
               <h2 className="font-display font-semibold text-slate-900">Live map</h2>
               {active && (
                 <button
-                  onClick={() => setSharing((value) => !value)}
+                  onClick={toggleSharing}
                   className={`inline-flex items-center gap-1.5 text-xs font-semibold px-3 py-1.5 rounded-full transition-colors ${
                     sharing ? 'bg-safe-50 text-safe-700' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
                   }`}

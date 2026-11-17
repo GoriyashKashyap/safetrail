@@ -1,4 +1,4 @@
-import { useEffect, useMemo } from 'react';
+import { useEffect, useMemo, useRef } from 'react';
 import { MapContainer, Marker, Polyline, TileLayer, useMap } from 'react-leaflet';
 import L from 'leaflet';
 import { MapPin } from 'lucide-react';
@@ -17,17 +17,40 @@ const makeIcon = (status) =>
     iconAnchor: [18, 36],
   });
 
-function FitToPoints({ points }) {
+function FollowTrail({ points }) {
   const map = useMap();
+  const fitted = useRef(false);
+  // Identity of the newest fix: a new render with the same trail must not
+  // touch the viewport.
+  const newest = points.length
+    ? `${points.length}:${points[points.length - 1].lat},${points[points.length - 1].lng}`
+    : '';
 
   useEffect(() => {
-    if (!points.length) return;
-    if (points.length === 1) {
-      map.setView([points[0].lat, points[0].lng], 14);
+    if (!points.length) {
+      fitted.current = false;
       return;
     }
-    map.fitBounds(L.latLngBounds(points.map((p) => [p.lat, p.lng])), { padding: [40, 40] });
-  }, [map, points]);
+
+    const last = points[points.length - 1];
+
+    if (!fitted.current) {
+      if (points.length === 1) {
+        map.setView([last.lat, last.lng], 14);
+      } else {
+        map.fitBounds(L.latLngBounds(points.map((p) => [p.lat, p.lng])), { padding: [40, 40] });
+      }
+      fitted.current = true;
+      return;
+    }
+
+    // A live pin moves every 30 s; refitting each time would throw away the
+    // viewer's zoom. Only pan when the traveller leaves the visible area.
+    if (!map.getBounds().pad(-0.12).contains([last.lat, last.lng])) {
+      map.panTo([last.lat, last.lng], { animate: true });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [map, newest]);
 
   return null;
 }
@@ -75,7 +98,7 @@ export default function LiveMap({ points = [], status = 'active', height = 320, 
           />
         )}
         <Marker position={[last.lat, last.lng]} icon={icon} />
-        <FitToPoints points={clean} />
+        <FollowTrail points={clean} />
       </MapContainer>
     </div>
   );

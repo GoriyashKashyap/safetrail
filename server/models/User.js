@@ -38,6 +38,11 @@ const userSchema = new mongoose.Schema(
       default: false,
     },
     telegramChatId: { type: String, default: null, sparse: true },
+    // Short, Telegram-safe code used by the t.me deep link. Telegram only
+    // accepts A-Z a-z 0-9 _ - and at most 64 characters in the ?start= value,
+    // so a JWT (long, contains dots) is silently dropped by the client.
+    telegramLinkCode: { type: String, select: false },
+    telegramLinkExpires: { type: Date, select: false },
     emailVerificationToken: { type: String, select: false },
     emailVerificationExpires: { type: Date, select: false },
 

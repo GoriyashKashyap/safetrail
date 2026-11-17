@@ -368,7 +368,14 @@ export default function Settings() {
                   >
                     Open @{telegramLink.botUsername}
                   </a>{' '}
-                  and press Start — the link expires in {telegramLink.expiresInMinutes} minutes.
+                  and press Start — the code expires in {telegramLink.expiresInMinutes} minutes.
+                </p>
+                <p>
+                  Still not connected (bot silent or blocked)? Send this message to @
+                  {telegramLink.botUsername} instead:{' '}
+                  <code className="rounded bg-slate-100 px-1.5 py-0.5 text-slate-700">
+                    {telegramLink.command}
+                  </code>
                 </p>
                 <button
                   onClick={refreshTelegram}

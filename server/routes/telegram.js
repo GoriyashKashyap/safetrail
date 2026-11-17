@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import crypto from 'crypto';
 import jwt from 'jsonwebtoken';
 import User from '../models/User.js';
 import Trip from '../models/Trip.js';
@@ -21,12 +22,68 @@ import {
 const router = Router();
 
 const LINK_SCOPE = 'telegram-link';
+const LINK_TTL_MS = 15 * 60 * 1000;
 
-const statusEmoji = { active: '🟢', overdue: '🟠', sos: '🚨', scheduled: '🕒', completed: '✅', cancelled: '⚪' };
+/**
+ * Telegram only forwards a `?start=` value made of A-Z a-z 0-9 _ - and at most
+ * 64 characters — a JWT (long, dot-separated) is dropped by the client, which
+ * is why deep links did nothing. A 32-character hex code fits comfortably and
+ * is also short enough to type by hand with /link.
+ */
+const issueLinkCode = async (userId) => {
+  const code = crypto.randomBytes(16).toString('hex');
+  await User.updateOne(
+    { _id: userId },
+    {
+      $set: {
+        telegramLinkCode: code,
+        telegramLinkExpires: new Date(Date.now() + LINK_TTL_MS),
+      },
+    }
+  );
+  return code;
+};
 
-const minutesUntil = (date) => {
-  if (!date) return null;
-  return Math.round((new Date(date).getTime() - Date.now()) / 60000);
+const userFromCode = (code) =>
+  code
+    ? User.findOne({
+        telegramLinkCode: code,
+        telegramLinkExpires: { $gt: new Date() },
+      })
+    : null;
+
+/** Links generated before the code switch carry a 15-minute JWT — still honoured. */
+const userFromLegacyToken = async (token) => {
+  try {
+    const payload = jwt.verify(token, process.env.JWT_SECRET);
+    if (payload.scope !== LINK_SCOPE) return null;
+    return await User.findById(payload.id);
+  } catch {
+    return null;
+  }
+};
+
+/** Bind the chat and confirm it in the same conversation. */
+const linkChat = async (chatId, user) => {
+  await User.updateOne(
+    { _id: user._id },
+    {
+      $set: { telegramChatId: String(chatId), 'settings.notifyByTelegram': true },
+      $unset: { telegramLinkCode: '', telegramLinkExpires: '' },
+    }
+  );
+
+  await sendMessage(
+    chatId,
+    [
+      `👋 Connected to <b>${escapeHtml(user.name)}</b>'s SafeTrail account.`,
+      '',
+      'SOS, missed check-ins, check-ins and live position pins arrive here.',
+      '',
+      helpText(),
+    ].join('\n'),
+    { html: true, buttons: [[{ text: 'Open SafeTrail', url: getAppUrl() }]] }
+  );
 };
 
 // ── GET /api/telegram/link — deep link that connects this account ────────────
@@ -42,25 +99,37 @@ router.get(
       return res.status(502).json({ message: 'Could not reach the Telegram bot API.' });
     }
 
-    const token = jwt.sign({ id: req.user._id, scope: LINK_SCOPE }, process.env.JWT_SECRET, {
-      expiresIn: '15m',
-    });
+    const code = await issueLinkCode(req.user._id);
 
     res.json({
       botUsername,
       connected: Boolean(req.user.telegramChatId),
-      deepLink: `https://t.me/${botUsername}?start=${token}`,
-      expiresInMinutes: 15,
+      // Telegram-safe: 32 characters of [0-9a-f], well inside its 64-char limit.
+      code,
+      deepLink: `https://t.me/${botUsername}?start=${code}`,
+      // Fallback for a blocked bot or a client that mangles the deep link.
+      command: `/link ${code}`,
+      expiresInMinutes: LINK_TTL_MS / 60000,
     });
   })
 );
+
+const statusEmoji = { active: '🟢', overdue: '🟠', sos: '🚨', scheduled: '🕒', completed: '✅', cancelled: '⚪' };
+
+const minutesUntil = (date) => {
+  if (!date) return null;
+  return Math.round((new Date(date).getTime() - Date.now()) / 60000);
+};
 
 // ── DELETE /api/telegram/link — disconnect this account ─────────────────────
 router.delete(
   '/link',
   protect,
   asyncHandler(async (req, res) => {
-    await User.updateOne({ _id: req.user._id }, { $unset: { telegramChatId: '' } });
+    await User.updateOne(
+      { _id: req.user._id },
+      { $unset: { telegramChatId: '', telegramLinkCode: '', telegramLinkExpires: '' } }
+    );
     res.json({ message: 'Telegram disconnected.' });
   })
 );
@@ -205,35 +274,49 @@ const handleCommand = async (chatId, text) => {
   const command = rawCommand.toLowerCase().replace(/@.*$/, '').split('?')[0];
   const appUrl = getAppUrl();
 
-  if (command === '/start') {
-    const token = args[0];
-    if (token) {
-      try {
-        const payload = jwt.verify(token, process.env.JWT_SECRET);
-        if (payload.scope !== LINK_SCOPE) throw new Error('wrong scope');
-        const user = await User.findById(payload.id);
-        if (!user) throw new Error('no user');
+  if (command === '/start' || command === '/link') {
+    const arg = args[0];
 
-        await User.updateOne({ _id: user._id }, { telegramChatId: chatId });
-        await sendMessage(
-          chatId,
-          [
-            `👋 Connected to <b>${escapeHtml(user.name)}</b>'s SafeTrail account.`,
-            '',
-            'You will now get SOS, missed check-in and trip updates here.',
-            '',
-            helpText(),
-          ].join('\n'),
-          { html: true, buttons: [[{ text: 'Open SafeTrail', url: appUrl }]] }
-        );
-        return;
-      } catch {
-        await sendMessage(chatId, 'That connect link is invalid or has expired. Generate a new one from Settings → Telegram.');
+    if (arg) {
+      const linked = (await userFromCode(arg)) || (await userFromLegacyToken(arg));
+      if (linked) {
+        await linkChat(chatId, linked);
         return;
       }
+      await sendMessage(
+        chatId,
+        [
+          'That connect code is invalid, already used, or older than 15 minutes.',
+          '',
+          'Open SafeTrail → Settings → Telegram → Connect for a fresh code, then send it here as /link &lt;code&gt;.',
+        ].join('\n'),
+        { html: true, buttons: [[{ text: 'Open SafeTrail', url: `${appUrl}/settings` }]] }
+      );
+      return;
     }
 
-    await sendMessage(chatId, `👋 Welcome to SafeTrail.\n\n${helpText()}`, { html: true });
+    const existing = await User.findOne({ telegramChatId: chatId });
+    if (existing) {
+      await sendMessage(
+        chatId,
+        `✅ This chat is already connected to <b>${escapeHtml(existing.name)}</b>.\n\n${helpText()}`,
+        { html: true }
+      );
+      return;
+    }
+
+    await sendMessage(
+      chatId,
+      [
+        '👋 Welcome to SafeTrail.',
+        '',
+        'To connect, open the app → Settings → Telegram → Connect and press Start,',
+        'or send the code shown there as <code>/link &lt;code&gt;</code>.',
+        '',
+        helpText(),
+      ].join('\n'),
+      { html: true, buttons: [[{ text: 'Open SafeTrail', url: `${appUrl}/settings` }]] }
+    );
     return;
   }
 
@@ -241,14 +324,29 @@ const handleCommand = async (chatId, text) => {
   if (!user) {
     await sendMessage(
       chatId,
-      'This chat is not linked. Open SafeTrail → Settings → Telegram → Connect, then press Start again.'
+      [
+        'This chat is not linked.',
+        '',
+        'Open SafeTrail → Settings → Telegram → Connect, then press Start,',
+        'or send the code shown there as <code>/link &lt;code&gt;</code>.',
+      ].join('\n'),
+      { html: true, buttons: [[{ text: 'Open Settings', url: `${appUrl}/settings` }]] }
     );
     return;
   }
 
   if (command === '/stop') {
     await User.updateOne({ _id: user._id }, { $unset: { telegramChatId: '' } });
-    await sendMessage(chatId, '🔕 Unsubscribed. You will no longer receive SafeTrail alerts here.');
+    await sendMessage(
+      chatId,
+      [
+        '🔕 Unsubscribed. You will no longer receive SafeTrail alerts here.',
+        '',
+        'Changed your mind? Open SafeTrail → Settings → Telegram → Connect,',
+        'or send <code>/link &lt;code&gt;</code> with the code shown there.',
+      ].join('\n'),
+      { html: true, buttons: [[{ text: 'Open Settings', url: `${appUrl}/settings` }]] }
+    );
     return;
   }
 

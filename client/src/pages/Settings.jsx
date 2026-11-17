@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { LogOut, MailWarning, Save, UserRound } from 'lucide-react';
+import { LogOut, MailWarning, MessageCircle, Save, UserRound } from 'lucide-react';
 import api, { apiError } from '../services/api.js';
 import { useAuth } from '../context/AuthContext.jsx';
 import Banner from '../components/ui/Banner.jsx';
@@ -20,12 +20,14 @@ export default function Settings() {
     notifyByEmail: user?.settings?.notifyByEmail ?? true,
     notifyBySMS: user?.settings?.notifyBySMS ?? true,
     notifyByPush: user?.settings?.notifyByPush ?? true,
-    notifyByTelegram: user?.settings?.notifyByTelegram ?? false,
+    notifyByTelegram: user?.settings?.notifyByTelegram ?? true,
   });
   const [busy, setBusy] = useState('');
   const [feedback, setFeedback] = useState(null);
   const [notice, setNotice] = useState('');
   const [resending, setResending] = useState(false);
+  const [telegramBusy, setTelegramBusy] = useState('');
+  const [telegramLink, setTelegramLink] = useState(null);
 
   const saveProfile = async (event) => {
     event.preventDefault();
@@ -70,6 +72,46 @@ export default function Settings() {
       setNotice(apiError(err, 'Could not resend the verification email.'));
     } finally {
       setResending(false);
+    }
+  };
+
+  const connectTelegram = async () => {
+    setTelegramBusy('connect');
+    setFeedback(null);
+    try {
+      const { data } = await api.get('/telegram/link');
+      setTelegramLink(data);
+      window.open(data.deepLink, '_blank', 'noopener,noreferrer');
+      setNotice(`Press Start in Telegram (@${data.botUsername}) to finish connecting.`);
+    } catch (err) {
+      setFeedback({ tone: 'error', text: apiError(err, 'Could not create a Telegram link.') });
+    } finally {
+      setTelegramBusy('');
+    }
+  };
+
+  const refreshTelegram = async () => {
+    setTelegramBusy('refresh');
+    try {
+      await refreshUser();
+      setNotice('Telegram status refreshed.');
+    } finally {
+      setTelegramBusy('');
+    }
+  };
+
+  const disconnectTelegram = async () => {
+    setTelegramBusy('disconnect');
+    setFeedback(null);
+    try {
+      await api.delete('/telegram/link');
+      await refreshUser();
+      setTelegramLink(null);
+      setFeedback({ tone: 'success', text: 'Telegram disconnected. You will no longer get alerts there.' });
+    } catch (err) {
+      setFeedback({ tone: 'error', text: apiError(err, 'Could not disconnect Telegram.') });
+    } finally {
+      setTelegramBusy('');
     }
   };
 
@@ -222,6 +264,93 @@ export default function Settings() {
           </button>
         </div>
       </form>
+
+      <div className="card p-6 space-y-4">
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <h2 className="font-display font-semibold text-slate-900 flex items-center gap-2">
+              <MessageCircle className="w-4 h-4 text-slate-400" />
+              Telegram
+            </h2>
+            <p className="text-sm text-slate-500 mt-1">
+              SOS alerts, missed check-ins and live map pins arrive in a chat — nothing to install.
+            </p>
+          </div>
+          <span
+            className={`shrink-0 text-xs font-medium px-2.5 py-1 rounded-full ${
+              user?.telegramChatId
+                ? 'bg-safe-50 text-safe-700'
+                : 'bg-slate-100 text-slate-500'
+            }`}
+          >
+            {user?.telegramChatId ? 'Connected' : 'Not connected'}
+          </span>
+        </div>
+
+        {user?.telegramChatId ? (
+          <div className="flex flex-wrap gap-2">
+            <button
+              onClick={refreshTelegram}
+              disabled={telegramBusy === 'refresh'}
+              className="btn-ghost border border-slate-200 flex items-center gap-1.5"
+            >
+              {telegramBusy === 'refresh' ? <Spinner className="w-4 h-4" /> : null}
+              Refresh status
+            </button>
+            <button
+              onClick={disconnectTelegram}
+              disabled={telegramBusy === 'disconnect'}
+              className="btn-ghost border border-slate-200 text-danger-600 flex items-center gap-1.5"
+            >
+              {telegramBusy === 'disconnect' ? <Spinner className="w-4 h-4" /> : null}
+              Disconnect
+            </button>
+          </div>
+        ) : (
+          <div className="space-y-3">
+            <button
+              onClick={connectTelegram}
+              disabled={telegramBusy === 'connect'}
+              className="btn-primary inline-flex items-center gap-1.5"
+            >
+              {telegramBusy === 'connect' ? <Spinner className="w-4 h-4" /> : <MessageCircle className="w-4 h-4" />}
+              {telegramBusy === 'connect' ? 'Opening Telegram…' : 'Connect Telegram'}
+            </button>
+
+            {telegramLink?.deepLink && (
+              <div className="text-sm text-slate-500 space-y-2">
+                <p>
+                  Telegram didn't open?{' '}
+                  <a
+                    href={telegramLink.deepLink}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="text-shield-600 underline"
+                  >
+                    Open @{telegramLink.botUsername}
+                  </a>{' '}
+                  and press Start — the link expires in {telegramLink.expiresInMinutes} minutes.
+                </p>
+                <button
+                  onClick={refreshTelegram}
+                  disabled={telegramBusy === 'refresh'}
+                  className="btn-ghost border border-slate-200"
+                >
+                  I've pressed Start
+                </button>
+              </div>
+            )}
+          </div>
+        )}
+
+        <div className="rounded-xl bg-slate-50 p-3 text-xs text-slate-500 space-y-1">
+          <p className="font-medium text-slate-600">Inside the chat</p>
+          <p>
+            /status — live trips and check-in state · /map — latest positions · /trips — history ·
+            /stop — stop alerts
+          </p>
+        </div>
+      </div>
 
       <div className="card p-6 flex items-center justify-between gap-4">
         <div>

@@ -2,10 +2,11 @@ import { Router } from 'express';
 import { body, validationResult } from 'express-validator';
 import Trip from '../models/Trip.js';
 import Location from '../models/Location.js';
-import Alert from '../models/Alert.js';
 import Guardian from '../models/Guardian.js';
 import { protect } from '../middleware/auth.js';
 import { asyncHandler } from '../middleware/errorHandler.js';
+import { claimPendingGuardianships } from '../services/guardianship.js';
+import { feedLiveLocation, loadGuardianContacts, notifyGuardians } from '../services/notify.js';
 
 const router = Router();
 
@@ -14,6 +15,16 @@ const validate = (req, res, next) => {
   if (!errors.isEmpty()) return res.status(400).json({ message: errors.array()[0].msg });
   next();
 };
+
+// Notifications must never block an API response: a slow SMTP host would
+// otherwise stall SOS for minutes.
+const dispatch = (promise, label) =>
+  promise.catch((err) => console.error(`[notify] ${label} failed:`, err.message));
+
+// Telegram is a chat, not a map server — stream at most one live fix every
+// few minutes per trip.
+const TELEGRAM_FEED_MS = Number(process.env.TELEGRAM_FEED_MINUTES || 3) * 60 * 1000;
+const lastFeedAt = new Map();
 
 // ── GET /api/trips — my trips ────────────────────────────────────────────────
 router.get(
@@ -56,6 +67,10 @@ router.get(
   '/watching',
   protect,
   asyncHandler(async (req, res) => {
+    // Invitations addressed to this account are activated on first use, so a
+    // guardian added mid-trip sees that trip immediately.
+    await claimPendingGuardianships(req.user);
+
     const guardianships = await Guardian.find({
       guardianUser: req.user._id,
       status: 'active',
@@ -198,12 +213,18 @@ router.post(
     trip.nextCheckInDue = new Date(now.getTime() + trip.checkInInterval * 60 * 1000);
     await trip.save();
 
-    // Notify guardians via socket (handled in socket layer)
-    req.app.get('io')?.to(`trip:${trip._id}`).emit('trip:started', {
-      tripId: trip._id,
-      travellerName: req.user.name,
-      destination: trip.destination.label,
-    });
+    // Socket + email + Telegram to every active guardian.
+    dispatch(
+      notifyGuardians({
+        io: req.app.get('io'),
+        trip,
+        travellerName: req.user.name,
+        type: 'trip_started',
+        severity: 'info',
+        message: `${req.user.name} started a trip to ${trip.destination.label}.`,
+      }),
+      'trip_started'
+    );
 
     res.json({ message: 'Trip started. Stay safe!', trip });
   })
@@ -284,6 +305,19 @@ router.post(
       timestamp: loc.timestamp,
     });
 
+    // Throttled Telegram feed: one pin + live-map link every few minutes.
+    const feedKey = String(trip._id);
+    if (Date.now() - (lastFeedAt.get(feedKey) || 0) >= TELEGRAM_FEED_MS) {
+      lastFeedAt.set(feedKey, Date.now());
+      dispatch(
+        (async () => {
+          const contacts = await loadGuardianContacts(trip);
+          await feedLiveLocation({ trip, travellerName: req.user.name, lat, lng, contacts });
+        })(),
+        'location feed'
+      );
+    }
+
     res.json({ ok: true });
   })
 );
@@ -307,25 +341,20 @@ router.post(
     trip.sos = { triggeredAt: new Date(), lat, lng, message: message || 'SOS triggered' };
     await trip.save();
 
-    // Create alert record
-    await Alert.create({
-      trip: trip._id,
-      traveller: req.user._id,
-      type: 'sos',
-      severity: 'critical',
-      message: message || 'SOS triggered',
-      location: { lat, lng },
-      notifiedGuardians: trip.guardians.map((g) => g._id),
-      channels: { socket: true },
-    });
-
-    // Blast to guardian room
-    req.app.get('io')?.to(`trip:${trip._id}`).emit('trip:sos', {
-      tripId: trip._id,
-      travellerName: req.user.name,
-      lat, lng, message,
-      triggeredAt: trip.sos.triggeredAt,
-    });
+    // Critical alert: socket blast + email + Telegram, recorded as an Alert.
+    // Fired without blocking the response so a slow SMTP host cannot stall SOS.
+    dispatch(
+      notifyGuardians({
+        io: req.app.get('io'),
+        trip,
+        travellerName: req.user.name,
+        type: 'sos',
+        severity: 'critical',
+        message: message || 'SOS triggered — they need help now.',
+        location: lat && lng ? { lat, lng } : null,
+      }),
+      'sos'
+    );
 
     res.json({ message: 'SOS sent. Your guardians are being alerted.', trip });
   })
@@ -353,6 +382,18 @@ router.post(
       travellerName: req.user.name,
       arrivedAt: trip.arrivedAt,
     });
+
+    dispatch(
+      notifyGuardians({
+        io: req.app.get('io'),
+        trip,
+        travellerName: req.user.name,
+        type: 'arrived',
+        severity: 'info',
+        message: `${req.user.name} arrived at ${trip.destination.label}.`,
+      }),
+      'arrived'
+    );
 
     res.json({ message: 'Trip completed. Welcome to your destination!', trip });
   })

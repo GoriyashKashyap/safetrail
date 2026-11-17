@@ -38,6 +38,7 @@ const alertSchema = new mongoose.Schema(
       sms: { type: Boolean, default: false },
       push: { type: Boolean, default: false },
       socket: { type: Boolean, default: false },
+      telegram: { type: Boolean, default: false },
     },
 
     notifiedGuardians: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Guardian' }],

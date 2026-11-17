@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { ArrowRight, Eye, MapPin, Users } from 'lucide-react';
+import { ArrowRight, Eye, MapPin, ShieldCheck } from 'lucide-react';
 import api, { apiError } from '../services/api.js';
 import { useAuth } from '../context/AuthContext.jsx';
 import useSocketEvent from '../hooks/useSocketEvent.js';
@@ -17,6 +17,8 @@ export default function Watching() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [alert, setAlert] = useState(null);
+  const [notice, setNotice] = useState(null);
+  const [busyId, setBusyId] = useState('');
 
   const load = useCallback(async () => {
     try {
@@ -45,6 +47,8 @@ export default function Watching() {
     return undefined;
   }, [socket]);
 
+  const rejoinRooms = useCallback(() => socket?.emit('guardian:join-all'), [socket]);
+
   useSocketEvent(socket, 'alert:overdue', (payload) => {
     if (!payload) return;
     setAlert({
@@ -66,8 +70,50 @@ export default function Watching() {
   useSocketEvent(socket, 'trip:checkin', () => load());
   useSocketEvent(socket, 'trip:completed', () => load());
 
+  // A trip can start while this page is already open: the guardian is not yet
+  // in that trip's room, so refresh both the room list and the data.
+  useSocketEvent(socket, 'trip:started', (payload) => {
+    setNotice({
+      tone: 'info',
+      text: `${payload?.travellerName || 'Someone you guard'} started a trip${
+        payload?.destination ? ` to ${payload.destination}` : ''
+      }.`,
+    });
+    rejoinRooms();
+    load();
+  });
+
+  useSocketEvent(socket, 'guardian:added', (payload) => {
+    setNotice({
+      tone: 'success',
+      text: `${payload?.travellerName || 'A traveller'} added you as a guardian. Their live trips are below.`,
+    });
+    rejoinRooms();
+    load();
+  });
+
+  const respond = async (id, action) => {
+    setBusyId(id);
+    setError('');
+    try {
+      await api.post(`/guardians/${id}/${action}`);
+      setNotice({
+        tone: 'success',
+        text: action === 'accept' ? 'Invitation accepted — you are now their guardian.' : 'Invitation declined.',
+      });
+      await load();
+      rejoinRooms();
+    } catch (err) {
+      setError(apiError(err, 'Could not update the invitation.'));
+    } finally {
+      setBusyId('');
+    }
+  };
+
   if (loading) return <PageLoader label="Loading trips you watch…" />;
 
+  const activeGuardianships = guardianships.filter((guardian) => guardian.status === 'active');
+  const pendingGuardianships = guardianships.filter((guardian) => guardian.status === 'pending');
   const live = trips.filter((trip) => isActiveStatus(trip.status));
   const past = trips.filter((trip) => !isActiveStatus(trip.status));
 
@@ -76,7 +122,15 @@ export default function Watching() {
       <div>
         <h1 className="font-display text-2xl font-bold text-slate-900">Watching</h1>
         <p className="text-sm text-slate-500 mt-1">
-          Live trips you're a guardian for. You'll be alerted here if someone misses a check-in.
+          The people you guard and their live trips. You'll be alerted here if someone misses a check-in or
+          triggers an SOS.
+        </p>
+        <p className="text-xs text-slate-400 mt-1.5">
+          Want these alerts on your phone? Connect Telegram in{' '}
+          <Link to="/settings" className="text-shield-600 hover:underline">
+            Settings
+          </Link>
+          .
         </p>
       </div>
 
@@ -86,15 +140,104 @@ export default function Watching() {
           {alert.text}
         </Banner>
       )}
+      {notice && (
+        <Banner tone={notice.tone} onDismiss={() => setNotice(null)}>
+          {notice.text}
+        </Banner>
+      )}
 
-      {guardianships.length === 0 ? (
+      {activeGuardianships.length === 0 && pendingGuardianships.length === 0 ? (
         <EmptyState
           icon={Eye}
           title="You're not watching anyone yet"
-          description="When someone adds you as their guardian, accept the invite and their live trips will show up here."
+          description="When someone adds you as their guardian, their live trips show up here — even if the trip is already running."
         />
       ) : (
         <>
+          {pendingGuardianships.length > 0 && (
+            <section className="space-y-3">
+              <h2 className="font-display font-semibold text-slate-900">Invitations</h2>
+              <div className="card divide-y divide-slate-50">
+                {pendingGuardianships.map((guardianship) => (
+                  <div key={guardianship._id} className="p-4 flex flex-wrap items-center gap-3">
+                    <span className="w-9 h-9 rounded-full bg-amber-50 text-amber-700 text-xs font-bold flex items-center justify-center">
+                      {initials(guardianship.traveller?.name)}
+                    </span>
+                    <div className="min-w-0 flex-1">
+                      <p className="text-sm font-medium text-slate-800 truncate">
+                        {guardianship.traveller?.name || 'A traveller'}
+                      </p>
+                      <p className="text-xs text-slate-400 truncate">
+                        Wants you as their {String(guardianship.label || 'guardian').toLowerCase()}
+                      </p>
+                    </div>
+                    <div className="flex gap-2">
+                      <button
+                        onClick={() => respond(guardianship._id, 'accept')}
+                        disabled={busyId === guardianship._id}
+                        className="btn-primary text-sm disabled:opacity-60"
+                      >
+                        Accept
+                      </button>
+                      <button
+                        onClick={() => respond(guardianship._id, 'decline')}
+                        disabled={busyId === guardianship._id}
+                        className="btn-ghost border border-slate-200 text-sm disabled:opacity-60"
+                      >
+                        Decline
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </section>
+          )}
+
+          {activeGuardianships.length > 0 && (
+            <section className="space-y-3">
+              <h2 className="font-display font-semibold text-slate-900">People you guard</h2>
+              <div className="card divide-y divide-slate-50">
+                {/* Every monitored person is listed even when they are not
+                    travelling, so the guardian always knows who they watch. */}
+                {activeGuardianships.map((guardianship) => {
+                  const trip = guardianship.activeTrip;
+                  return (
+                    <div key={guardianship._id} className="p-4 flex flex-wrap items-center gap-3">
+                      <span className="w-9 h-9 rounded-full bg-shield-50 text-shield-700 text-xs font-bold flex items-center justify-center">
+                        {initials(guardianship.traveller?.name)}
+                      </span>
+                      <div className="min-w-0 flex-1">
+                        <p className="text-sm font-medium text-slate-800 truncate">
+                          {guardianship.traveller?.name || 'Traveller'}
+                        </p>
+                        <p className="text-xs text-slate-400 truncate">
+                          {guardianship.label}
+                          {guardianship.traveller?.email ? ` · ${guardianship.traveller.email}` : ''}
+                        </p>
+                      </div>
+
+                      {trip ? (
+                        <Link
+                          to={`/guardian/trip/${trip._id}`}
+                          className="flex items-center gap-2 text-sm font-medium text-shield-600 hover:text-shield-700"
+                        >
+                          <StatusBadge status={trip.status} />
+                          Live map
+                          <ArrowRight className="w-3.5 h-3.5" />
+                        </Link>
+                      ) : (
+                        <span className="flex items-center gap-1.5 text-xs text-slate-400">
+                          <ShieldCheck className="w-3.5 h-3.5" />
+                          No trip in progress
+                        </span>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </section>
+          )}
+
           <section className="space-y-3">
             <h2 className="font-display font-semibold text-slate-900">In progress</h2>
             {live.length === 0 ? (
@@ -143,28 +286,6 @@ export default function Watching() {
                 ))}
               </div>
             )}
-          </section>
-
-          <section className="space-y-3">
-            <h2 className="font-display font-semibold text-slate-900">People you guard</h2>
-            <div className="card divide-y divide-slate-50">
-              {guardianships.map((guardianship) => (
-                <div key={guardianship._id} className="p-4 flex items-center gap-3">
-                  <span className="w-9 h-9 rounded-full bg-slate-100 text-slate-500 text-xs font-bold flex items-center justify-center">
-                    {initials(guardianship.traveller?.name)}
-                  </span>
-                  <div className="min-w-0 flex-1">
-                    <p className="text-sm font-medium text-slate-800 truncate">
-                      {guardianship.traveller?.name || 'Traveller'}
-                    </p>
-                    <p className="text-xs text-slate-400 truncate">
-                      {guardianship.label} · {guardianship.traveller?.email}
-                    </p>
-                  </div>
-                  <Users className="w-4 h-4 text-slate-300" />
-                </div>
-              ))}
-            </div>
           </section>
 
           {past.length > 0 && (

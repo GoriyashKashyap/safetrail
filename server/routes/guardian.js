@@ -3,9 +3,13 @@ import crypto from 'crypto';
 import { body, validationResult } from 'express-validator';
 import Guardian from '../models/Guardian.js';
 import User from '../models/User.js';
+import Trip from '../models/Trip.js';
 import { protect } from '../middleware/auth.js';
 import { asyncHandler } from '../middleware/errorHandler.js';
 import { sendGuardianInviteEmail } from '../utils/email.js';
+import { sendMessage } from '../utils/telegram.js';
+import { getAppUrl } from '../config/appUrl.js';
+import { attachGuardianToTrips, claimPendingGuardianships } from '../services/guardianship.js';
 
 const router = Router();
 
@@ -73,12 +77,19 @@ router.post(
     const inviteToken = crypto.randomBytes(32).toString('hex');
     const inviteExpires = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000); // 7 days
 
+    // A registered account is activated immediately: the traveller picked them
+    // on purpose, and waiting for an emailed "accept" click meant a guardian
+    // added mid-trip never saw the trip. Guests stay pending until they open
+    // the invite link.
+    const autoActive = Boolean(existingUser);
+
     const guardianData = {
       traveller: req.user._id,
       label: label || 'Guardian',
       inviteToken,
       inviteExpires,
-      status: 'pending',
+      status: autoActive ? 'active' : 'pending',
+      ...(autoActive ? { acceptedAt: new Date() } : {}),
     };
 
     if (existingUser) {
@@ -92,6 +103,24 @@ router.post(
     const guardian = existing
       ? Object.assign(existing, guardianData) && await existing.save()
       : await Guardian.create(guardianData);
+
+    // Attach to live trips and tell the guardian right away — socket first,
+    // Telegram as the out-of-app channel.
+    if (autoActive) {
+      await attachGuardianToTrips(guardian);
+      req.app.get('io')?.to(`user:${existingUser._id}`).emit('guardian:added', {
+        guardianId: guardian._id,
+        travellerName: req.user.name,
+        label: guardian.label,
+      });
+      if (existingUser.telegramChatId) {
+        await sendMessage(
+          existingUser.telegramChatId,
+          `<b>🛡 ${req.user.name} added you as a safety guardian</b>\n\nYou can follow their live trips and receive alerts.\n${getAppUrl()}/watching`,
+          { html: true, buttons: [[{ text: 'Open SafeTrail', url: `${getAppUrl()}/watching` }]] }
+        );
+      }
+    }
 
     // Send invite email
     let emailSent = true;
@@ -108,10 +137,13 @@ router.post(
     }
 
     res.status(201).json({
-      message: emailSent
-        ? `Invitation sent to ${email}.`
-        : `Guardian added, but the invitation email to ${email} could not be sent. Check the server logs.`,
+      message: autoActive
+        ? `${existingUser.name || email} is now your guardian and can follow your trips.`
+        : emailSent
+          ? `Invitation sent to ${email}.`
+          : `Guardian added, but the invitation email to ${email} could not be sent. Check the server logs.`,
       emailSent,
+      active: autoActive,
       guardian,
     });
   })
@@ -180,17 +212,98 @@ router.delete(
   })
 );
 
-// ── GET /api/guardians/watching — trips I'm guarding (for guardian view) ────
+// ── GET /api/guardians/watching — people I guard ────────────────────────────
 router.get(
   '/watching',
   protect,
   asyncHandler(async (req, res) => {
+    // Invitations waiting for this account are activated on first visit.
+    await claimPendingGuardianships(req.user);
+
+    // Pending ones are listed too: if the automatic claim above could not
+    // resolve an invitation, the guardian still sees it and can accept in-app.
     const guardianships = await Guardian.find({
       guardianUser: req.user._id,
-      status: 'active',
-    }).populate('traveller', 'name email phone avatar');
+      status: { $in: ['active', 'pending'] },
+    })
+      .populate('traveller', 'name email phone avatar lastSeen')
+      .sort({ acceptedAt: -1, createdAt: -1 });
 
-    res.json({ guardianships });
+    const travellerIds = guardianships
+      .filter((guardian) => guardian.status === 'active')
+      .map((g) => g.traveller?._id)
+      .filter(Boolean);
+    const liveTrips = travellerIds.length
+      ? await Trip.find({
+          traveller: { $in: travellerIds },
+          status: { $in: ['active', 'overdue', 'sos'] },
+        })
+          .select('traveller title destination status lastCheckIn nextCheckInDue sos startTime')
+          .lean()
+      : [];
+
+    // One live trip per traveller (the most recently started one).
+    const tripByTraveller = new Map();
+    for (const trip of liveTrips) {
+      const key = String(trip.traveller);
+      const current = tripByTraveller.get(key);
+      if (!current || new Date(trip.startTime) > new Date(current.startTime)) {
+        tripByTraveller.set(key, trip);
+      }
+    }
+
+    res.json({
+      guardianships: guardianships.map((guardian) => ({
+        ...guardian.toObject(),
+        activeTrip:
+          guardian.status === 'active'
+            ? tripByTraveller.get(String(guardian.traveller?._id)) || null
+            : null,
+      })),
+    });
+  })
+);
+
+// ── POST /api/guardians/:id/accept — guardian accepts an invite ─────────────
+router.post(
+  '/:id/accept',
+  protect,
+  asyncHandler(async (req, res) => {
+    const guardian = await Guardian.findOne({
+      _id: req.params.id,
+      $or: [{ guardianUser: req.user._id }, { guardianUser: null, guestEmail: req.user.email }],
+      status: { $in: ['pending', 'active'] },
+    });
+    if (!guardian) return res.status(404).json({ message: 'Invitation not found.' });
+
+    guardian.guardianUser = req.user._id;
+    guardian.status = 'active';
+    guardian.acceptedAt = guardian.acceptedAt || new Date();
+    await guardian.save();
+    await attachGuardianToTrips(guardian);
+
+    res.json({ message: 'You are now a guardian.', guardian });
+  })
+);
+
+// ── POST /api/guardians/:id/decline — guardian declines an invite ───────────
+router.post(
+  '/:id/decline',
+  protect,
+  asyncHandler(async (req, res) => {
+    const guardian = await Guardian.findOne({
+      _id: req.params.id,
+      $or: [{ guardianUser: req.user._id }, { guardianUser: null, guestEmail: req.user.email }],
+      status: 'pending',
+    });
+    if (!guardian) return res.status(404).json({ message: 'Invitation not found.' });
+
+    guardian.status = 'declined';
+    guardian.inviteToken = undefined;
+    guardian.inviteExpires = undefined;
+    await guardian.save();
+
+    res.json({ message: 'Invitation declined.', guardian });
   })
 );
 

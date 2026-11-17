@@ -12,6 +12,7 @@ import { errorHandler, notFound } from './middleware/errorHandler.js';
 import { initSocketHandlers } from './middleware/handlers.js';
 import { startWatchdog } from './jobs/checkinWatchdog.js';
 import { isEmailConfigured, verifySmtp } from './utils/email.js';
+import { ensureWebhook, isTelegramConfigured, resolveWebhookUrl } from './utils/telegram.js';
 
 // Routes
 import authRoutes from './routes/auth.js';
@@ -124,6 +125,7 @@ app.get('/api/health', (req, res) =>
   res.json({
     status: 'ok',
     email: isEmailConfigured() ? 'configured' : 'not-configured',
+    telegram: isTelegramConfigured() ? 'configured' : 'not-configured',
     timestamp: new Date().toISOString(),
   })
 );
@@ -161,6 +163,26 @@ const start = async () => {
     verifySmtp()
       .then((config) => console.log(`✓ Email  : SMTP ${config.host}:${config.port} reachable`))
       .catch((err) => console.error(`✗ Email  : SMTP check failed — ${err.message}`));
+  }
+
+  if (!isTelegramConfigured()) {
+    console.warn(`
+✗  Telegram is NOT configured
+   Guardians will only get in-app (socket) and email alerts.
+   Set TELEGRAM_BOT_TOKEN in server/.env (see .env.example).
+`);
+  } else if (!resolveWebhookUrl()) {
+    console.log('✓ Telegram : bot configured (commands disabled — set SERVER_URL + TELEGRAM_WEBHOOK_SECRET)');
+  } else {
+    // Idempotent: refreshes the webhook so bot commands keep working after a
+    // deploy that changed the public hostname.
+    ensureWebhook()
+      .then((ok) =>
+        ok
+          ? console.log('✓ Telegram : bot + webhook ready')
+          : console.error('✗ Telegram : webhook registration failed — check TELEGRAM_WEBHOOK_SECRET / SERVER_URL')
+      )
+      .catch((err) => console.error(`✗ Telegram : ${err.message}`));
   }
 
   httpServer.listen(PORT, () => {

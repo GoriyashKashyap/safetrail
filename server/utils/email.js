@@ -25,12 +25,22 @@ export const isEmailConfigured = () => {
   return Boolean(config.host && config.user && config.pass);
 };
 
+const envMs = (name, fallback) => {
+  const value = Number(process.env[name]);
+  return Number.isFinite(value) && value > 0 ? value : fallback;
+};
+
 const createTransporter = () => {
   const config = getSmtpConfig();
   return nodemailer.createTransport({
     host: config.host,
     port: config.port,
     secure: config.secure,
+    // Nodemailer waits 2 minutes by default, which made a blocked SMTP port
+    // look like a hung request. Fail fast instead; deliver() still retries.
+    connectionTimeout: envMs('SMTP_CONNECTION_TIMEOUT', 15000),
+    greetingTimeout: envMs('SMTP_GREETING_TIMEOUT', 10000),
+    socketTimeout: envMs('SMTP_SOCKET_TIMEOUT', 20000),
     ...(config.requireTLS ? { requireTLS: true } : {}),
     auth: {
       user: config.user,
@@ -298,16 +308,8 @@ export const sendGuardianInviteEmail = async ({ toEmail, toName, travellerName, 
     subject: `${travellerName} added you as their safety guardian on SafeTrail`,
     html,
   });
-  // Also forward to Telegram if the guardian has subscribed
-  // We look up the guardian user by e‑mail to check their telegramChatId
-  const guardianUser = await User.findOne({ email: toEmail });
-  if (guardianUser?.telegramChatId) {
-    await telegram.send(
-      guardianUser.telegramChatId,
-      `<b>🛡 ${travellerName}</b> added you as a safety guardian on SafeTrail.\n\nAccept: ${acceptUrl}`,
-      true
-    );
-  }
+  // Telegram delivery for guardians lives in services/notify.js, which knows
+  // the guardian's settings and permissions.
 };
 
 // ── SOS / Overdue alert email ───────────────────────────────────────────────
@@ -317,27 +319,61 @@ export const sendAlertEmail = async ({ toEmail, toName, travellerName, type, tri
   const mapsUrl = location
     ? `https://www.google.com/maps?q=${location.lat},${location.lng}`
     : null;
+  const destination = trip.destination?.label || 'their destination';
+
+  // One palette per event so the email always describes what actually happened.
+  const variant = isSOS
+    ? {
+        bg: '#fef2f2',
+        border: '#ef4444',
+        heading: '#dc2626',
+        label: '🚨 SOS Alert',
+        lead: `<strong>${travellerName}</strong> has triggered an SOS on SafeTrail.`,
+        subject: `🚨 SOS — ${travellerName} needs help`,
+      }
+    : type === 'arrived'
+      ? {
+          bg: '#f0fdf4',
+          border: '#22c55e',
+          heading: '#15803d',
+          label: '✅ Arrived safely',
+          lead: `<strong>${travellerName}</strong> reached <strong>${destination}</strong>.`,
+          subject: `✅ ${travellerName} arrived safely — SafeTrail`,
+        }
+      : type === 'trip_started'
+        ? {
+            bg: '#eff6ff',
+            border: '#3b82f6',
+            heading: '#1d4ed8',
+            label: '🚀 Trip started',
+            lead: `<strong>${travellerName}</strong> started a trip to <strong>${destination}</strong>.`,
+            subject: `🚀 ${travellerName} started a trip — SafeTrail`,
+          }
+        : {
+            bg: '#fffbeb',
+            border: '#f59e0b',
+            heading: '#d97706',
+            label: '⚠️ Check-in Overdue',
+            lead: `<strong>${travellerName}</strong> has not checked in for their trip to <strong>${destination}</strong>.`,
+            subject: `⚠️ ${travellerName} is overdue — SafeTrail`,
+          };
 
   const html = emailWrapper(
-    isSOS ? `🚨 SOS from ${travellerName}` : `⚠️ ${travellerName} is overdue`,
+    `${variant.label} — ${travellerName}`,
     `
     <div style="
-      background:${isSOS ? '#fef2f2' : '#fffbeb'};
-      border:2px solid ${isSOS ? '#ef4444' : '#f59e0b'};
+      background:${variant.bg};
+      border:2px solid ${variant.border};
       border-radius:8px;padding:20px;margin-bottom:24px;">
-      <h2 style="margin:0 0 8px;color:${isSOS ? '#dc2626' : '#d97706'};font-size:20px;">
-        ${isSOS ? '🚨 SOS Alert' : '⚠️ Check-in Overdue'}
+      <h2 style="margin:0 0 8px;color:${variant.heading};font-size:20px;">
+        ${variant.label}
       </h2>
       <p style="margin:0;font-size:15px;color:#334155;">
-        <strong>${travellerName}</strong> ${
-          isSOS
-            ? 'has triggered an SOS on SafeTrail.'
-            : `has not checked in for their trip to <strong>${trip.destination?.label}</strong>.`
-        }
+        ${variant.lead}
       </p>
     </div>
     <p style="margin:0 0 16px;font-size:15px;color:#334155;">
-      Trip: <strong>${trip.title || trip.destination?.label}</strong><br>
+      Trip: <strong>${trip.title || destination}</strong><br>
       Started: ${new Date(trip.startTime).toLocaleString()}
     </p>
     ${
@@ -359,12 +395,8 @@ export const sendAlertEmail = async ({ toEmail, toName, travellerName, type, tri
   return deliver({
     from: process.env.EMAIL_FROM,
     to: toEmail,
-    subject: isSOS
-      ? `🚨 SOS — ${travellerName} needs help`
-      : `⚠️ ${travellerName} is overdue — SafeTrail`,
+    subject: variant.subject,
     html,
-    priority: 'high',
+    priority: isSOS ? 'high' : 'normal',
   });
-  // Forward to Telegram for any guardian that has subscribed
-  console.log("[alert] Telegram would be sent to subscribed guardians for", travellerName);
 };

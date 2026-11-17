@@ -68,9 +68,27 @@ const guardianSchema = new mongoose.Schema(
   }
 );
 
-// Ensure a traveller can't add the same guardian twice
-guardianSchema.index({ traveller: 1, guardianUser: 1 }, { unique: true, sparse: true });
-guardianSchema.index({ traveller: 1, guestEmail: 1 }, { unique: true, sparse: true });
+// Ensure a traveller can't add the same guardian twice. Partial indexes are
+// required here: `sparse` only skips documents where *every* key is missing,
+// so { traveller, guestEmail: null } rows were still indexed and a traveller
+// could have just one registered guardian. A guardian is either a user or a
+// guest, so each index only covers the rows it applies to.
+guardianSchema.index(
+  { traveller: 1, guardianUser: 1 },
+  {
+    name: 'traveller_guardian_unique',
+    unique: true,
+    partialFilterExpression: { guardianUser: { $type: 'objectId' } },
+  }
+);
+guardianSchema.index(
+  { traveller: 1, guestEmail: 1 },
+  {
+    name: 'traveller_guest_email_unique',
+    unique: true,
+    partialFilterExpression: { guestEmail: { $type: 'string' } },
+  }
+);
 
 // Virtual: display name resolved from either source
 guardianSchema.virtual('displayName').get(function () {

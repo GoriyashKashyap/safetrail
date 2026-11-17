@@ -1,6 +1,6 @@
 # 🛡 SafeTrail
 
-**SafeTrail** is a real-time travel-safety platform. A traveller registers a trip, checks in periodically while moving, and shares live location, trip status, and emergency alerts with a small circle of trusted **guardians** (family or friends). If the traveller misses a check-in, SafeTrail automatically flags the trip as overdue and notifies the guardians over real-time sockets and email. A one-tap **SOS** escalates immediately.
+**SafeTrail** is a real-time travel-safety platform. A traveller registers a trip, checks in periodically while moving, and shares live location, trip status, and emergency alerts with a small circle of trusted **guardians** (family or friends). If the traveller misses a check-in, SafeTrail automatically flags the trip as overdue and notifies the guardians over real-time sockets, email and Telegram. A one-tap **SOS** escalates immediately.
 
 The repository is a JavaScript monorepo with two independent packages:
 
@@ -49,7 +49,7 @@ Solo and vulnerable travellers often want someone to know where they are and tha
 
 **Traveller** — a registered `User` who owns trips.
 
-**Guardian** — a trusted contact attached to a traveller (`Guardian` document). It may point at a registered user (`guardianUser`) or hold guest contact details (`guestEmail`, `guestName`, `guestPhone`). Guardians have granular permissions: `viewLiveLocation`, `receiveAlerts`, `viewTripHistory`, `sendNudge`. Their lifecycle is `pending → active` (or `declined` / `removed`). An invite token is valid for 7 days.
+**Guardian** — a trusted contact attached to a traveller (`Guardian` document). It may point at a registered user (`guardianUser`) or hold guest contact details (`guestEmail`, `guestName`, `guestPhone`). Guardians have granular permissions: `viewLiveLocation`, `receiveAlerts`, `viewTripHistory`, `sendNudge`. Their lifecycle is `pending → active` (or `declined` / `removed`); a guardianship for an existing account starts `active`. An invite token is valid for 7 days.
 
 **Trip** — a journey with a status machine:
 `scheduled → active → completed`, with `overdue` and `sos` as exceptional states, and `cancelled` for scheduled trips that are deleted.
@@ -79,12 +79,14 @@ Solo and vulnerable travellers often want someone to know where they are and tha
 
 ### Guardians
 - Invite by email; auto-links to an existing account or stores guest details.
+- **A registered invitee is activated immediately** (the traveller picked them on purpose) and attached to any trip already in progress, so a guardian added mid-trip sees that trip at once. Guest invites stay `pending` until they open the accept link or sign up; invitations addressed to the signed-in account are claimed automatically on first visit.
 - Self-invite blocked; maximum of 5 pending/active guardians per traveller.
-- Duplicate-invite protection (unique sparse indexes on traveller+user and traveller+email).
-- Tokenised accept link that needs no login and expires after 7 days.
+- Duplicate-invite protection via **partial** unique indexes on traveller+user and traveller+email (a traveller can have several registered guardians and several guest guardians).
+- Tokenised accept link that needs no login and expires after 7 days; pending invitations can also be accepted or declined in-app.
 - Editable label (e.g. "Mom", "Best Friend") and permissions.
 - Soft removal via `status: 'removed'`.
-- A guardian-side endpoint listing everyone the user is currently guarding.
+- `GET /api/guardians/watching` lists **everyone the user guards** together with `activeTrip` — the person's current live trip, if any — so the guardian always knows who they monitor.
+- New guardians are announced over sockets (`guardian:added`) and Telegram when they have a linked chat.
 
 ### Trips & live tracking
 - Create, list (paginated, filterable by status), fetch, start, check in, complete, and cancel trips.
@@ -96,10 +98,20 @@ Solo and vulnerable travellers often want someone to know where they are and tha
 - Every state change broadcasts a Socket.IO event to the trip room.
 
 ### Safety & alerts
-- SOS transitions the trip to `sos`, records an `Alert` with `critical` severity, and blasts `trip:sos` to guardians.
-- Watchdog cron (every 5 minutes) detects missed check-ins, marks trips overdue, creates email alerts, and notifies guardians and the traveller.
+- SOS transitions the trip to `sos`, records an `Alert` with `critical` severity, and notifies guardians over three channels — socket (trip room **and** each guardian's personal room), email with a maps link, and Telegram — without blocking the HTTP response, so a slow SMTP host cannot delay the alarm.
+- The same fan-out (`services/notify.js`) covers trip started, missed check-in (watchdog) and arrived-safely, so every event has one consistent set of channels and one `Alert` record listing the guardians reached.
+- Watchdog cron (every 5 minutes) detects missed check-ins, marks trips overdue, and notifies guardians and the traveller.
 - Guardians can "nudge" a traveller over sockets; the traveller receives a direct message in their personal room.
-- Email templates (responsive HTML) for verification, password reset, guardian invite, and SOS/overdue alerts — the alert email includes a Google Maps link to the last known location.
+- Email templates (responsive HTML) for verification, password reset, guardian invite, and trip-started/overdue/arrived/SOS alerts — each with its own copy, colour and maps link.
+
+### Telegram bot
+Guardians (and travellers) can follow everything from a chat, with no app open:
+
+- **Connect**: `Settings → Telegram → Connect` calls `GET /api/telegram/link`, which returns a `t.me/<bot>?start=<token>` deep link (15-minute JWT). Pressing **Start** binds `telegramChatId` to the account.
+- **Commands**: `/status` (live trips plus check-in state), `/map` (a pin for the latest position of every live trip), `/trips` (recent trips and the people you guard), `/stop` (unlink), `/help`.
+- **Push alerts**: SOS, missed check-in, trip started and arrived are sent with route, transport, status, last/next check-in, a maps link and an inline "Open live map" button.
+- **Live feed**: every `TELEGRAM_FEED_MINUTES` (default 3) a background GPS ping also sends a location pin plus a maps link to guardians who may view live location. Telegram bots cannot stream a live location, so the pin is a snapshot and the button opens the real map.
+- **Webhook**: `npm run telegram:webhook` registers `<SERVER_URL|RENDER_EXTERNAL_URL>/api/telegram/webhook/<TELEGRAM_WEBHOOK_SECRET>`; the server also refreshes it at boot. Requests without the secret are answered `404`.
 
 ---
 
@@ -291,7 +303,7 @@ Base URL: `http://localhost:5000/api`. Protected routes require `Authorization: 
 ### Health
 | Method | Path | Auth | Description |
 | --- | --- | --- | --- |
-| GET | `/health` | – | `{ status: 'ok', timestamp }` |
+| GET | `/health` | – | `{ status: 'ok', email, telegram, timestamp }` |
 
 ### Auth — `/api/auth` (limiter: 20 requests / 15 min / IP)
 | Method | Path | Auth | Description |
@@ -309,11 +321,20 @@ Base URL: `http://localhost:5000/api`. Protected routes require `Authorization: 
 | Method | Path | Auth | Description |
 | --- | --- | --- | --- |
 | GET | `/` | ✅ | List my guardians (linked user fields populated). |
-| POST | `/invite` | ✅ | Add guardian: `{ email, label?, name?, phone? }`. Max 5; blocks self and duplicates; sends invite email. |
+| POST | `/invite` | ✅ | Add guardian: `{ email, label?, name?, phone? }`. Max 5; blocks self and duplicates. A registered email is activated immediately and attached to live trips; a guest stays `pending` and gets an invite email. |
 | GET | `/accept?token=` | – | Public invite acceptance; sets `status: active`. |
+| POST | `/:id/accept` | ✅ | Signed-in guardian accepts a pending invitation. |
+| POST | `/:id/decline` | ✅ | Signed-in guardian declines a pending invitation. |
 | PATCH | `/:id` | ✅ | Update `label` and/or `permissions` (owner only). |
 | DELETE | `/:id` | ✅ | Soft-remove guardian (`status: 'removed'`). |
-| GET | `/watching` | ✅ | Guardianships where I am the guardian (trips I watch). |
+| GET | `/watching` | ✅ | Everyone I guard (`active` and any unclaimed `pending`), each with `activeTrip` — that person's live trip or `null`. |
+
+### Telegram — `/api/telegram`
+| Method | Path | Auth | Description |
+| --- | --- | --- | --- |
+| GET | `/link` | ✅ | `{ botUsername, connected, deepLink, expiresInMinutes }`; the deep link embeds a 15-minute `telegram-link` JWT. |
+| DELETE | `/link` | ✅ | Unlink the chat from this account. |
+| POST | `/webhook/:secret` | secret | Telegram Bot API updates. Requires `TELEGRAM_WEBHOOK_SECRET` (path or `x-telegram-bot-api-secret-token` header); anything else is `404`. Handles `/start <token>`, `/status`, `/trips`, `/map`, `/stop`, `/help`. |
 
 ### Trips — `/api/trips`
 | Method | Path | Auth | Description |
@@ -324,11 +345,11 @@ Base URL: `http://localhost:5000/api`. Protected routes require `Authorization: 
 | GET | `/:id` | ✅ | Trip with populated guardians (owner only). |
 | GET | `/:id/locations` | ✅ | Location history; allowed for the owner or an **active guardian** of that traveller. |
 | POST | `/` | ✅ | Create trip: `destination.label`, `startTime`, `estimatedArrival` required; optional `title`, `origin`, `transport`, `transportRef`, `checkInInterval`, `guardianIds`. |
-| POST | `/:id/start` | ✅ | `scheduled → active`; sets `lastCheckIn` and `nextCheckInDue`; emits `trip:started`. |
+| POST | `/:id/start` | ✅ | `scheduled → active`; sets `lastCheckIn` and `nextCheckInDue`; notifies guardians (`trip:started` over socket + email + Telegram). |
 | POST | `/:id/checkin` | ✅ | Body `{ lat?, lng?, note?, battery? }`; resets timer; stores a check-in (and a `Location` if coordinates given); emits `trip:checkin`. Works while `active` or `overdue`. |
-| POST | `/:id/location` | ✅ | Background GPS ping `{ lat, lng, accuracy?, speed?, heading?, altitude?, battery? }`; stores `Location`; emits `location:update`. |
-| POST | `/:id/sos` | ✅ | Body `{ lat?, lng?, message? }`; sets `sos` status, creates critical `Alert`, emits `trip:sos`. |
-| POST | `/:id/complete` | ✅ | Ends trip, sets `arrivedAt`, clears `nextCheckInDue`, emits `trip:completed`. |
+| POST | `/:id/location` | ✅ | Background GPS ping `{ lat, lng, accuracy?, speed?, heading?, altitude?, battery? }`; stores `Location`; emits `location:update`; pushes a throttled Telegram pin + live-map link. |
+| POST | `/:id/sos` | ✅ | Body `{ lat?, lng?, message? }`; sets `sos` status, creates a critical `Alert`, and alerts every active guardian over socket, email and Telegram (dispatched in the background). |
+| POST | `/:id/complete` | ✅ | Ends trip, sets `arrivedAt`, clears `nextCheckInDue`, emits `trip:completed`, notifies guardians of the safe arrival. |
 | DELETE | `/:id` | ✅ | Cancel a `scheduled` trip (soft: `status: 'cancelled'`). |
 
 Error shape is consistently `{ "message": "..." }`. The central error handler maps Mongoose validation errors to `400`, duplicate keys to `409`, and cast errors to `400`.
@@ -358,17 +379,20 @@ The server verifies the token, loads the user, and rejects the connection otherw
 ### Server → client
 | Event | Target room | Payload |
 | --- | --- | --- |
-| `trip:started` | `trip:<id>` | `{ tripId, travellerName, destination }` |
+| `trip:started` | `trip:<id>` + `user:<guardianId>` | `{ tripId, travellerName, destination, status }` |
 | `trip:checkin` | `trip:<id>` | `{ tripId, lat, lng, note, battery, confirmedAt, travellerName }` |
 | `location:update` | `trip:<id>` | `{ tripId, lat, lng, accuracy, speed, battery, timestamp }` |
-| `trip:sos` | `trip:<id>` | `{ tripId, travellerName, lat, lng, message, triggeredAt }` |
-| `trip:completed` | `trip:<id>` | `{ tripId, travellerName, arrivedAt }` |
-| `alert:overdue` | `trip:<id>` | `{ tripId, travellerName, message, triggeredAt }` |
+| `trip:sos` | `trip:<id>` + `user:<guardianId>` | `{ tripId, travellerName, destination, lat, lng, message, triggeredAt }` |
+| `trip:completed` | `trip:<id>` + `user:<guardianId>` | `{ tripId, travellerName, arrivedAt }` |
+| `alert:overdue` | `trip:<id>` + `user:<guardianId>` | `{ tripId, travellerName, message, triggeredAt }` |
+| `guardian:added` | `user:<guardianId>` | `{ guardianId, travellerName, label }` |
 | `trip:overdue-warning` | `user:<travellerId>` | `{ tripId, message }` |
 | `trip:nudge` | `user:<travellerId>` | `{ tripId, guardianName, message }` |
 | `guardian:rooms-joined` | socket | `{}` |
 | `trip:joined` | socket | `{ tripId }` |
 | `error` | socket | `{ message }` |
+
+Guardian-facing events go to the trip room **and** to each guardian's personal room, so a guardian whose page was open before the trip started still receives it.
 
 ---
 
@@ -379,11 +403,8 @@ The server verifies the token, loads the user, and rejects the connection otherw
 For each trip with `status: 'active'` and `nextCheckInDue < now`:
 
 1. Set `status = 'overdue'`.
-2. Create an `Alert` of type `overdue` (severity `warning`) with a human-readable "last check-in was N minutes ago" message.
-3. Load the trip's guardians whose status is `active`.
-4. Emit `alert:overdue` to `trip:<id>` and `trip:overdue-warning` to `user:<travellerId>`; mark the alert's `socket` channel used.
-5. Email every resolvable guardian address (registered user's email or guest email), marking the `email` channel on success.
-6. Save `notifiedGuardians` and the alert.
+2. Call `notifyGuardians({ type: 'overdue' })`: emits `alert:overdue` to the trip room and each guardian's personal room, emails every guardian who allows email alerts, sends a Telegram message to linked chats, and stores one `Alert` with a "last check-in was N minutes ago" message, the channels used and the guardians reached.
+3. Call `notifyTraveller(...)`: emits `trip:overdue-warning` to `user:<travellerId>` and messages them on Telegram if linked.
 
 Note: the user-level `settings.alertBuffer` is modelled but the watchdog does not currently apply it — overdue fires exactly at `nextCheckInDue`.
 
@@ -401,7 +422,8 @@ Note: the user-level `settings.alertBuffer` is modelled but the watchdog does no
 - **Enumeration resistance:** forgot-password always returns the same response.
 - **Token hygiene:** verification/reset/invite tokens are hidden from normal queries (`select: false`) and cleared after use.
 - **CORS:** restricted to `CLIENT_URL` with credentials, for both HTTP and WebSocket.
-- **Not implemented:** SMS and push notification delivery — the settings and `Alert.channels` flags exist, but only email and socket are wired up. Helmet's CSP is disabled; no refresh-token rotation or revocation list exists.
+- **Not implemented:** SMS and push notification delivery — the settings and `Alert.channels` flags exist, but only socket, email and Telegram are wired up. Helmet's CSP is disabled; no refresh-token rotation or revocation list exists.
+- **Webhook auth:** the Telegram webhook path contains `TELEGRAM_WEBHOOK_SECRET` and is also checked against the `x-telegram-bot-api-secret-token` header; without a match the route answers `404` so the endpoint is indistinguishable from a typo.
 
 ---
 
@@ -414,6 +436,8 @@ Copy `server/.env.example` to `server/.env` and adjust the values:
 NODE_ENV=development
 PORT=5000
 CLIENT_URL=http://localhost:5173
+# PUBLIC_APP_URL=https://safetrail.vercel.app   # links inside emails
+# SERVER_URL=https://safetrail-service.onrender.com   # Telegram webhook base
 
 # ── Database ─────────────────────────────────────────────
 MONGO_URI=mongodb://127.0.0.1:27017/safetrail
@@ -428,7 +452,14 @@ SMTP_PORT=587
 SMTP_USER=your-brevo-login@example.com
 SMTP_PASS=your-brevo-smtp-key
 EMAIL_FROM="SafeTrail <no-reply@your-verified-domain.com>"
+
+# ── Telegram bot ─────────────────────────────────────────
+TELEGRAM_BOT_TOKEN=
+TELEGRAM_WEBHOOK_SECRET=
+TELEGRAM_FEED_MINUTES=3
 ```
+
+Create the bot with **@BotFather** (`/newbot`), put the token in `TELEGRAM_BOT_TOKEN`, choose any long random `TELEGRAM_WEBHOOK_SECRET`, then run `cd server && npm run telegram:webhook` once. Users connect from **Settings → Telegram**. On Render, `RENDER_EXTERNAL_URL` replaces `SERVER_URL` automatically, and the server re-registers the webhook on every boot.
 
 Email uses Brevo's SMTP relay (free plan: 300 emails/day, no card required). Verify the `EMAIL_FROM` sender and publish its SPF/DKIM records under **Brevo → Settings → Senders & Domains**, then copy the SMTP login and generate an SMTP key under **Brevo → SMTP & API**; without a verified sender, Brevo rejects the message. Any other SMTP provider works by swapping host, port and credentials.
 
@@ -494,16 +525,16 @@ Other client scripts: `npm run build` (production bundle) and `npm run preview`.
 `POST /register` → account created (`isVerified: false`) + JWT returned → verification email → `GET /verify-email?token=…` sets `isVerified: true`.
 
 **Invite a guardian**
-`POST /guardians/invite` → Guardian created as `pending` with a 7-day token → invite email → guardian opens `/accept-guardian?token=…` → `GET /guardians/accept` sets `active` and `acceptedAt`.
+`POST /guardians/invite` → if the email belongs to an account the guardianship is `active` at once, attached to any trip already running, and the guardian is told over sockets (and Telegram when linked) → otherwise the Guardian is created as `pending` with a 7-day token and an invite email is sent → the guest opens `/accept-guardian?token=…` (`GET /guardians/accept`) **or** registers; on their first visit `POST /trips/watching` / `GET /guardians/watching` claims the invitation automatically.
 
 **Run a trip**
-Create trip (`scheduled`) → `POST /trips/:id/start` (`active`, timer set) → guardian joins `trip:<id>` → traveller posts `/checkin` and `/location` → guardian sees live updates → `POST /trips/:id/complete` (`completed`).
+Create trip (`scheduled`) → `POST /trips/:id/start` (`active`, timer set, guardians notified) → guardian opens Watching, which joins `trip:<id>` → traveller posts `/checkin` and `/location` → guardian sees live updates (and gets Telegram pins every few minutes) → `POST /trips/:id/complete` (`completed`).
 
 **Missed check-in**
-Timer expires → watchdog within 5 minutes sets `overdue` → alert saved, socket events emitted, guardian emails sent → traveller checks in → status returns to `active`.
+Timer expires → watchdog within 5 minutes sets `overdue` → one alert per guardians' channel set (socket, email, Telegram) → traveller checks in → status returns to `active`.
 
 **Emergency**
-`POST /trips/:id/sos` → `sos` status + critical Alert → `trip:sos` broadcast to the room with coordinates. Note: the SOS route currently notifies guardians over sockets only — it does not send email; the reusable SOS email template exists but is only wired into the watchdog's overdue path.
+`POST /trips/:id/sos` → `sos` status + critical `Alert` → guardians receive `trip:sos` in the trip room and their personal rooms, an email with the last coordinates, and a Telegram message with a map pin and an "Open live map" button. The notification fan-out runs in the background so the SOS response is immediate.
 
 **Guardian nudge**
 Guardian emits `guardian:nudge` → server verifies guardianship → `trip:nudge` to the traveller's `user:<id>` room.

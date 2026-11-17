@@ -58,6 +58,7 @@ const userSchema = new mongoose.Schema(
       notifyByEmail: { type: Boolean, default: true },
       notifyBySMS: { type: Boolean, default: true },
       notifyByPush: { type: Boolean, default: true },
+      notifyByTelegram: { type: Boolean, default: true },
     },
 
     lastSeen: { type: Date, default: Date.now },

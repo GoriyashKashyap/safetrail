@@ -1,14 +1,11 @@
 import cron from 'node-cron';
 import Trip from '../models/Trip.js';
-import Alert from '../models/Alert.js';
-import Guardian from '../models/Guardian.js';
-import User from '../models/User.js';
-import { sendAlertEmail } from '../utils/email.js';
+import { notifyGuardians, notifyTraveller } from '../services/notify.js';
 
 /**
  * Watchdog cron — runs every 5 minutes.
- * Finds active trips where nextCheckInDue has passed,
- * marks them overdue, and fires the alert chain.
+ * Finds active trips where nextCheckInDue has passed, marks them overdue and
+ * fires the alert chain (socket + email + Telegram) through services/notify.js.
  */
 export const startWatchdog = (io) => {
   cron.schedule('*/5 * * * *', async () => {
@@ -16,11 +13,10 @@ export const startWatchdog = (io) => {
     console.log(`[Watchdog] Running at ${now.toISOString()}`);
 
     try {
-      // All active trips where next check-in is overdue
       const overdueTrips = await Trip.find({
         status: 'active',
         nextCheckInDue: { $lt: now },
-      }).populate('traveller', 'name email phone');
+      }).populate('traveller', 'name email phone telegramChatId');
 
       if (!overdueTrips.length) return;
 
@@ -28,86 +24,31 @@ export const startWatchdog = (io) => {
 
       for (const trip of overdueTrips) {
         try {
-          // Mark as overdue
           trip.status = 'overdue';
           await trip.save();
 
-          // Create alert record
-          const alert = await Alert.create({
-            trip: trip._id,
-            traveller: trip.traveller._id,
+          const minutesAgo = trip.lastCheckIn
+            ? Math.round((now - new Date(trip.lastCheckIn)) / 60000)
+            : null;
+          const message = `${trip.traveller.name} has not checked in. Last check-in was ${
+            minutesAgo === null ? 'never' : `${minutesAgo} minutes ago`
+          }.`;
+
+          await notifyGuardians({
+            io,
+            trip,
+            travellerName: trip.traveller.name,
             type: 'overdue',
             severity: 'warning',
-            message: `${trip.traveller.name} has not checked in. Last check-in was ${
-              trip.lastCheckIn
-                ? Math.round((now - new Date(trip.lastCheckIn)) / 60000) + ' minutes ago'
-                : 'unknown'
-            }.`,
-            channels: {},
-            notifiedGuardians: [],
+            message,
           });
 
-          // Fetch active guardians
-          const guardians = await Guardian.find({
-            _id: { $in: trip.guardians },
-            status: 'active',
+          await notifyTraveller({
+            io,
+            trip,
+            traveller: trip.traveller,
+            text: 'You are overdue for a check-in. Your guardians have been notified — check in as soon as you are safe.',
           });
-
-          // Resolve guardian contact info
-          const guardianUsers = await Promise.all(
-            guardians.map(async (g) => {
-              if (g.guardianUser) {
-                const u = await User.findById(g.guardianUser).select('name email phone');
-                return { guardian: g, user: u, email: u?.email, name: u?.name };
-              }
-              return { guardian: g, user: null, email: g.guestEmail, name: g.guestName };
-            })
-          );
-
-          // Emit socket alert to trip room
-          io?.to(`trip:${trip._id}`).emit('alert:overdue', {
-            tripId: trip._id,
-            travellerName: trip.traveller.name,
-            message: alert.message,
-            triggeredAt: now,
-          });
-          alert.channels.socket = true;
-
-          // Also notify traveller directly
-          io?.to(`user:${trip.traveller._id}`).emit('trip:overdue-warning', {
-            tripId: trip._id,
-            message: 'You are overdue for a check-in. Your guardians are being notified.',
-          });
-
-          // Send emails to guardians
-          let emailSent = 0;
-          let emailAttempts = 0;
-          for (const { email, name } of guardianUsers) {
-            if (!email) continue;
-            emailAttempts += 1;
-            try {
-              await sendAlertEmail({
-                toEmail: email,
-                toName: name,
-                travellerName: trip.traveller.name,
-                type: 'overdue',
-                trip,
-                location: null,
-              });
-              emailSent += 1;
-            } catch (e) {
-              console.error(`[Watchdog] Alert email to ${email} failed:`, e.message);
-            }
-          }
-          if (emailSent) alert.channels.email = true;
-          if (emailAttempts && !emailSent) {
-            console.error(
-              `[Watchdog] No alert email was delivered for trip ${trip._id} (${emailAttempts} guardian(s)) — check the SMTP settings.`
-            );
-          }
-
-          alert.notifiedGuardians = guardians.map((g) => g._id);
-          await alert.save();
 
           console.log(`[Watchdog] Alert fired for trip ${trip._id} (${trip.traveller.name})`);
         } catch (tripErr) {

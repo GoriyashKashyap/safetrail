@@ -22,6 +22,13 @@ import telegramRoutes from './routes/telegram.js';
 const app = express();
 const httpServer = createServer(app);
 
+// Render (and any other reverse proxy) terminates TLS and forwards the client
+// address in X-Forwarded-For. Without this express-rate-limit warns about the
+// header and throttles every visitor under the proxy's single IP.
+if (process.env.NODE_ENV === 'production') {
+  app.set('trust proxy', 1);
+}
+
 // ── CORS ──────────────────────────────────────────────────────────────────────
 // CLIENT_URL accepts a comma-separated list so one deployment can serve the
 // local Vite dev server and the hosted frontend at the same time.

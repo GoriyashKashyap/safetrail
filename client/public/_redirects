@@ -1,0 +1,3 @@
+# Netlify SPA fallback: deep links such as /register must load index.html.
+# API and socket traffic never reaches this host once VITE_API_URL is set.
+/*    /index.html   200

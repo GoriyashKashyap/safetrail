@@ -126,6 +126,7 @@ app.get('/api/health', (req, res) =>
     status: 'ok',
     email: isEmailConfigured() ? 'configured' : 'not-configured',
     telegram: isTelegramConfigured() ? 'configured' : 'not-configured',
+    telegramCommands: resolveWebhookUrl() ? 'enabled' : 'no-public-url',
     timestamp: new Date().toISOString(),
   })
 );
@@ -172,17 +173,28 @@ const start = async () => {
    Set TELEGRAM_BOT_TOKEN in server/.env (see .env.example).
 `);
   } else if (!resolveWebhookUrl()) {
-    console.log('✓ Telegram : bot configured (commands disabled — set SERVER_URL + TELEGRAM_WEBHOOK_SECRET)');
+    console.log('✓ Telegram : bot configured (commands need a public SERVER_URL)');
   } else {
     // Idempotent: refreshes the webhook so bot commands keep working after a
-    // deploy that changed the public hostname.
-    ensureWebhook()
-      .then((ok) =>
-        ok
-          ? console.log('✓ Telegram : bot + webhook ready')
-          : console.error('✗ Telegram : webhook registration failed — check TELEGRAM_WEBHOOK_SECRET / SERVER_URL')
-      )
-      .catch((err) => console.error(`✗ Telegram : ${err.message}`));
+    // deploy that changed the public hostname. A free host often answers the
+    // first outbound call while still waking up, so one retry is attempted.
+    const register = (attempt = 1) =>
+      ensureWebhook()
+        .then((ok) => {
+          if (ok) {
+            console.log('✓ Telegram : bot + webhook ready');
+            return;
+          }
+          if (attempt < 2) {
+            console.warn('… Telegram : webhook registration failed, retrying in 30s');
+            setTimeout(() => register(attempt + 1), 30000);
+            return;
+          }
+          console.error('✗ Telegram : webhook registration failed — check SERVER_URL / TELEGRAM_WEBHOOK_SECRET');
+        })
+        .catch((err) => console.error(`✗ Telegram : ${err.message}`));
+
+    register();
   }
 
   httpServer.listen(PORT, () => {

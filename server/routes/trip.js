@@ -6,7 +6,12 @@ import Guardian from '../models/Guardian.js';
 import { protect } from '../middleware/auth.js';
 import { asyncHandler } from '../middleware/errorHandler.js';
 import { claimPendingGuardianships } from '../services/guardianship.js';
-import { feedLiveLocation, loadGuardianContacts, notifyGuardians } from '../services/notify.js';
+import {
+  feedLiveLocation,
+  loadGuardianContacts,
+  notifyCheckIn,
+  notifyGuardians,
+} from '../services/notify.js';
 
 const router = Router();
 
@@ -263,13 +268,26 @@ router.post(
       });
     }
 
-    // Broadcast to guardians
-    req.app.get('io')?.to(`trip:${trip._id}`).emit('trip:checkin', {
-      tripId: trip._id,
-      lat, lng, note, battery,
-      confirmedAt: now,
-      travellerName: req.user.name,
-    });
+    // In-app update for the trip room + each guardian's personal room, and a
+    // Telegram confirmation for every guardian chat. Fired without blocking the
+    // response so a slow network never stalls the check-in.
+    dispatch(
+      (async () => {
+        const contacts = await loadGuardianContacts(trip);
+        await notifyCheckIn({
+          io: req.app.get('io'),
+          trip,
+          travellerName: req.user.name,
+          lat,
+          lng,
+          note,
+          battery,
+          confirmedAt: now,
+          contacts,
+        });
+      })(),
+      'checkin'
+    );
 
     res.json({ message: "Check-in confirmed. Your guardians have been notified.", trip });
   })

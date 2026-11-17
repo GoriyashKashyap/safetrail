@@ -21,19 +21,25 @@ export default function Watching() {
   const [busyId, setBusyId] = useState('');
 
   const load = useCallback(async () => {
-    try {
-      const [watchRes, guardianRes] = await Promise.all([
-        api.get('/trips/watching'),
-        api.get('/guardians/watching'),
-      ]);
-      setTrips(watchRes.data.trips || []);
-      setGuardianships(guardianRes.data.guardianships || []);
-      setError('');
-    } catch (err) {
-      setError(apiError(err, 'Could not load the trips you watch.'));
-    } finally {
-      setLoading(false);
+    // Loaded independently: a temporary failure on one endpoint must not hide
+    // the trips that did load (that used to blank the whole page).
+    const [watchRes, guardianRes] = await Promise.allSettled([
+      api.get('/trips/watching'),
+      api.get('/guardians/watching'),
+    ]);
+
+    if (watchRes.status === 'fulfilled') setTrips(watchRes.value.data.trips || []);
+    if (guardianRes.status === 'fulfilled') {
+      setGuardianships(guardianRes.value.data.guardianships || []);
     }
+
+    const failure = watchRes.status === 'rejected' ? watchRes : guardianRes;
+    setError(
+      failure.status === 'rejected'
+        ? apiError(failure.reason, 'Could not load everything you watch.')
+        : ''
+    );
+    setLoading(false);
   }, []);
 
   useEffect(() => {
@@ -48,6 +54,23 @@ export default function Watching() {
   }, [socket]);
 
   const rejoinRooms = useCallback(() => socket?.emit('guardian:join-all'), [socket]);
+
+  // Sockets can be missed (backgrounded tab, flaky mobile network, a trip that
+  // started before this page was opened), so also poll while visible and
+  // refresh whenever the page regains focus.
+  useEffect(() => {
+    const tick = () => {
+      if (document.visibilityState === 'visible') load();
+    };
+    const interval = setInterval(tick, 30000);
+    window.addEventListener('focus', tick);
+    document.addEventListener('visibilitychange', tick);
+    return () => {
+      clearInterval(interval);
+      window.removeEventListener('focus', tick);
+      document.removeEventListener('visibilitychange', tick);
+    };
+  }, [load]);
 
   useSocketEvent(socket, 'alert:overdue', (payload) => {
     if (!payload) return;

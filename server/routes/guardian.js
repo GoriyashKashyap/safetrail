@@ -64,12 +64,16 @@ router.post(
     // Check if the invitee has an account
     const existingUser = await User.findOne({ email });
 
-    // Check for duplicate
-    const dupQuery = existingUser
-      ? { traveller: req.user._id, guardianUser: existingUser._id }
-      : { traveller: req.user._id, guestEmail: email };
-
-    const existing = await Guardian.findOne(dupQuery);
+    // Check for duplicate. A guest invite for this email must be reused when the
+    // invitee has since registered, otherwise the guest-email unique index
+    // rejects the new row.
+    const existing = await Guardian.findOne({
+      traveller: req.user._id,
+      $or: [
+        ...(existingUser ? [{ guardianUser: existingUser._id }] : []),
+        { guestEmail: email },
+      ],
+    });
     if (existing && existing.status !== 'declined' && existing.status !== 'removed') {
       return res.status(409).json({ message: 'This person is already your guardian.' });
     }
@@ -100,9 +104,20 @@ router.post(
       guardianData.guestPhone = phone;
     }
 
-    const guardian = existing
-      ? Object.assign(existing, guardianData) && await existing.save()
-      : await Guardian.create(guardianData);
+    let guardian;
+    if (existing) {
+      Object.assign(existing, guardianData);
+      // Promoted from a guest invite: drop the guest fields so the partial
+      // guest-email index no longer covers this row.
+      if (existingUser) {
+        existing.guestEmail = undefined;
+        existing.guestName = undefined;
+        existing.guestPhone = undefined;
+      }
+      guardian = await existing.save();
+    } else {
+      guardian = await Guardian.create(guardianData);
+    }
 
     // Attach to live trips and tell the guardian right away — socket first,
     // Telegram as the out-of-app channel.

@@ -1,7 +1,7 @@
 import Alert from '../models/Alert.js';
 import Guardian from '../models/Guardian.js';
 import { sendAlertEmail } from '../utils/email.js';
-import { sendMessage, sendLocation } from '../utils/telegram.js';
+import { escapeHtml, sendLocation, sendMessage } from '../utils/telegram.js';
 import { getAppUrl } from '../config/appUrl.js';
 
 /**
@@ -58,15 +58,17 @@ export const loadGuardianContacts = async (trip) => {
 
 /** Human-readable Telegram body for a trip event. */
 export const telegramBody = ({ title, trip, message, location, appUrl, role = 'guardian' }) => {
-  const lines = [`<b>${title}</b>`];
-  if (message) lines.push(message);
+  const lines = [`<b>${escapeHtml(title)}</b>`];
+  if (message) lines.push(escapeHtml(message));
 
   const from = trip.origin?.label;
   const to = trip.destination?.label;
-  if (to) lines.push(`<b>Route:</b> ${from ? `${from} → ` : ''}${to}`);
+  if (to) lines.push(`<b>Route:</b> ${from ? `${escapeHtml(from)} → ` : ''}${escapeHtml(to)}`);
   if (trip.transport) {
     lines.push(
-      `<b>Transport:</b> ${trip.transport}${trip.transportRef ? ` · ${trip.transportRef}` : ''}`
+      `<b>Transport:</b> ${escapeHtml(trip.transport)}${
+        trip.transportRef ? ` · ${escapeHtml(trip.transportRef)}` : ''
+      }`
     );
   }
   lines.push(`<b>Status:</b> ${String(trip.status || '').toUpperCase()}`);
@@ -213,6 +215,69 @@ export const notifyTraveller = async ({ io, trip, traveller, text, event = 'trip
 };
 
 /**
+ * Short Telegram update for a check-in. Deliberately lighter than
+ * notifyGuardians: no email and no Alert record, because a check-in every
+ * 15–60 minutes would otherwise flood inboxes and the alerts collection.
+ */
+export const notifyCheckIn = async ({
+  io,
+  trip,
+  travellerName,
+  lat,
+  lng,
+  note,
+  battery,
+  confirmedAt,
+  contacts,
+}) => {
+  // In-app first: the trip room plus every guardian's personal room, so the
+  // Watching page and the live trip page update even if the socket had not
+  // joined this trip's room (e.g. it started after the page was opened).
+  if (io) {
+    const rooms = [`trip:${trip._id}`];
+    for (const contact of contacts || []) {
+      if (contact.user?._id) rooms.push(`user:${contact.user._id}`);
+    }
+    io.to(rooms).emit('trip:checkin', {
+      tripId: trip._id,
+      lat,
+      lng,
+      note,
+      battery,
+      confirmedAt,
+      travellerName: travellerName || trip.traveller?.name || 'Traveller',
+      status: trip.status,
+      nextCheckInDue: trip.nextCheckInDue,
+    });
+  }
+
+  const targets = (contacts || []).filter((contact) => contact.chatId && contact.receiveAlerts);
+  if (!targets.length) return 0;
+
+  const appUrl = getAppUrl();
+  const lines = [
+    `<b>✅ ${escapeHtml(travellerName || trip.traveller?.name || 'Traveller')} checked in</b>`,
+    `<b>Status:</b> ${String(trip.status || 'active').toUpperCase()}`,
+    `<b>Checked in at:</b> ${new Date(confirmedAt || Date.now()).toLocaleString()}`,
+  ];
+  if (trip.nextCheckInDue) {
+    lines.push(`<b>Next check-in:</b> ${new Date(trip.nextCheckInDue).toLocaleString()}`);
+  }
+  if (note) lines.push(`<b>Note:</b> ${escapeHtml(note)}`);
+  if (lat && lng) lines.push(`<b>Position:</b> ${mapsLink(lat, lng)}`);
+  if (battery !== undefined && battery !== null) lines.push(`<b>Battery:</b> ${escapeHtml(battery)}%`);
+  lines.push(`<b>Live map:</b> ${appUrl}/guardian/trip/${trip._id}`);
+
+  const text = lines.join('\n');
+  const results = await Promise.all(
+    targets.map((contact) =>
+      sendMessage(contact.chatId, text, { html: true, buttons: tripButtons(trip, 'guardian') })
+    )
+  );
+  return results.filter(Boolean).length;
+};
+
+/**
  * Push one live position to guardians on Telegram. Telegram bots cannot stream
  * a live location, so this sends a pin plus a link to the live map.
  */
@@ -222,7 +287,7 @@ export const feedLiveLocation = async ({ trip, travellerName, lat, lng, contacts
 
   const appUrl = getAppUrl();
   const text = [
-    `<b>📍 ${travellerName || trip.traveller?.name || 'Traveller'} moved</b>`,
+    `<b>📍 ${escapeHtml(travellerName || trip.traveller?.name || 'Traveller')} moved</b>`,
     `<b>Position:</b> ${mapsLink(lat, lng)}`,
     `<b>Live map:</b> ${appUrl}/guardian/trip/${trip._id}`,
   ].join('\n');

@@ -1,4 +1,5 @@
 import 'dotenv/config';
+import crypto from 'crypto';
 
 const token = process.env.TELEGRAM_BOT_TOKEN;
 const API = token ? `https://api.telegram.org/bot${token}` : null;
@@ -6,6 +7,25 @@ const API = token ? `https://api.telegram.org/bot${token}` : null;
 let cachedUsername = process.env.TELEGRAM_BOT_USERNAME || null;
 
 export const isTelegramConfigured = () => Boolean(API);
+
+/**
+ * Escapes user-controlled text before it is sent with parse_mode=HTML.
+ * An unescaped `<` or `&` makes Telegram reject the whole message with 400.
+ */
+export const escapeHtml = (value) =>
+  String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+
+/**
+ * Secret that authenticates the webhook path. TELEGRAM_WEBHOOK_SECRET wins;
+ * otherwise a value derived from the bot token is used, so a deployment works
+ * without extra configuration (only the server knows the bot token).
+ */
+export const getWebhookSecret = () =>
+  process.env.TELEGRAM_WEBHOOK_SECRET ||
+  (token ? crypto.createHash('sha256').update(`safetrail-webhook:${token}`).digest('hex') : '');
 
 /** Low-level Bot API call. Returns the `result` field, or null on failure. */
 const call = async (method, payload) => {
@@ -69,11 +89,18 @@ export const setWebhook = (url, secretToken) =>
 export const deleteWebhook = () => call('deleteWebhook', {});
 
 /**
+ * What Telegram currently believes about this bot's webhook. `last_error_message`
+ * is the single most useful field when commands "do nothing": it reveals a
+ * rejected secret, a DNS failure or a sleeping host.
+ */
+export const getWebhookInfo = () => call('getWebhookInfo', {});
+
+/**
  * Public URL Telegram should POST updates to, or null when it cannot be
- * derived (local development, or the webhook secret is missing).
+ * derived (local development with no public SERVER_URL).
  */
 export const resolveWebhookUrl = () => {
-  const secret = process.env.TELEGRAM_WEBHOOK_SECRET;
+  const secret = getWebhookSecret();
   const base = (process.env.SERVER_URL || process.env.RENDER_EXTERNAL_URL || '')
     .trim()
     .replace(/\/+$/, '');
@@ -85,7 +112,7 @@ export const resolveWebhookUrl = () => {
 export const ensureWebhook = async () => {
   const url = resolveWebhookUrl();
   if (!url || !API) return null;
-  return setWebhook(url, process.env.TELEGRAM_WEBHOOK_SECRET);
+  return setWebhook(url, getWebhookSecret());
 };
 
 // Back-compat: older callers use telegram.send(chatId, text, html)

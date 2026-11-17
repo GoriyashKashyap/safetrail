@@ -111,7 +111,9 @@ Guardians (and travellers) can follow everything from a chat, with no app open:
 - **Commands**: `/status` (live trips plus check-in state), `/map` (a pin for the latest position of every live trip), `/trips` (recent trips and the people you guard), `/stop` (unlink), `/help`.
 - **Push alerts**: SOS, missed check-in, trip started and arrived are sent with route, transport, status, last/next check-in, a maps link and an inline "Open live map" button.
 - **Live feed**: every `TELEGRAM_FEED_MINUTES` (default 3) a background GPS ping also sends a location pin plus a maps link to guardians who may view live location. Telegram bots cannot stream a live location, so the pin is a snapshot and the button opens the real map.
-- **Webhook**: `npm run telegram:webhook` registers `<SERVER_URL|RENDER_EXTERNAL_URL>/api/telegram/webhook/<TELEGRAM_WEBHOOK_SECRET>`; the server also refreshes it at boot. Requests without the secret are answered `404`.
+- **Webhook**: `npm run telegram:webhook` registers `<SERVER_URL|RENDER_EXTERNAL_URL>/api/telegram/webhook/<secret>`; the server also registers it at boot (with one retry), so a normal deploy is enough. The secret is `TELEGRAM_WEBHOOK_SECRET` when set, otherwise one derived from the bot token (only the server knows it). Requests without the secret are answered `404`.
+- **Diagnostics**: `GET /api/telegram/status` reports `configured`, `connected`, `botUsername`, `commands: "enabled" | "no-public-url"`, `webhook: "registered" | "missing" | "unavailable"`, `pendingUpdates` (commands queued at Telegram because nothing was listening) and `lastError`. `POST /api/telegram/test` sends a real test message to the linked chat. Both are surfaced in `Settings → Telegram`, and `/api/health` also reports `telegramCommands`.
+- **Check-ins**: every check-in refreshes guardians in-app (trip room + each guardian's personal room) and confirms it in their Telegram chat (time, next check-in, note, position, live-map button) — without adding an email or an `Alert` per check-in.
 
 ---
 
@@ -334,7 +336,9 @@ Base URL: `http://localhost:5000/api`. Protected routes require `Authorization: 
 | --- | --- | --- | --- |
 | GET | `/link` | ✅ | `{ botUsername, connected, deepLink, expiresInMinutes }`; the deep link embeds a 15-minute `telegram-link` JWT. |
 | DELETE | `/link` | ✅ | Unlink the chat from this account. |
-| POST | `/webhook/:secret` | secret | Telegram Bot API updates. Requires `TELEGRAM_WEBHOOK_SECRET` (path or `x-telegram-bot-api-secret-token` header); anything else is `404`. Handles `/start <token>`, `/status`, `/trips`, `/map`, `/stop`, `/help`. |
+| GET | `/status` | ✅ | Bot, command and webhook diagnostics: `commands` (`enabled \| no-public-url`), `webhook` (`registered \| missing`), `pendingUpdates`, `lastError`. |
+| POST | `/test` | ✅ | Send a real test message to the linked chat; `400` when not connected, `502` when Telegram rejects it. |
+| POST | `/webhook/:secret` | secret | Telegram Bot API updates. Requires the webhook secret (path or `x-telegram-bot-api-secret-token` header); anything else is `404`. Handles `/start <token>`, `/status`, `/trips`, `/map`, `/stop`, `/help`. |
 
 ### Trips — `/api/trips`
 | Method | Path | Auth | Description |

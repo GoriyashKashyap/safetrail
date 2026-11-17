@@ -1,6 +1,6 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { LogOut, MailWarning, MessageCircle, Save, UserRound } from 'lucide-react';
+import { LogOut, MailWarning, MessageCircle, Save, Send, UserRound } from 'lucide-react';
 import api, { apiError } from '../services/api.js';
 import { useAuth } from '../context/AuthContext.jsx';
 import Banner from '../components/ui/Banner.jsx';
@@ -28,6 +28,22 @@ export default function Settings() {
   const [resending, setResending] = useState(false);
   const [telegramBusy, setTelegramBusy] = useState('');
   const [telegramLink, setTelegramLink] = useState(null);
+  const [telegramStatus, setTelegramStatus] = useState(null);
+
+  // Server-side truth about the bot: commands are only delivered when Telegram
+  // can reach the API, which the client cannot know on its own.
+  const loadTelegramStatus = async () => {
+    try {
+      const { data } = await api.get('/telegram/status');
+      setTelegramStatus(data);
+    } catch {
+      setTelegramStatus(null);
+    }
+  };
+
+  useEffect(() => {
+    loadTelegramStatus();
+  }, []);
 
   const saveProfile = async (event) => {
     event.preventDefault();
@@ -94,9 +110,24 @@ export default function Settings() {
     setTelegramBusy('refresh');
     try {
       await refreshUser();
+      await loadTelegramStatus();
       setNotice('Telegram status refreshed.');
     } finally {
       setTelegramBusy('');
+    }
+  };
+
+  const sendTelegramTest = async () => {
+    setTelegramBusy('test');
+    setFeedback(null);
+    try {
+      const { data } = await api.post('/telegram/test');
+      setFeedback({ tone: 'success', text: data.message });
+    } catch (err) {
+      setFeedback({ tone: 'error', text: apiError(err, 'Could not send the test message.') });
+    } finally {
+      setTelegramBusy('');
+      loadTelegramStatus();
     }
   };
 
@@ -290,6 +321,14 @@ export default function Settings() {
         {user?.telegramChatId ? (
           <div className="flex flex-wrap gap-2">
             <button
+              onClick={sendTelegramTest}
+              disabled={telegramBusy === 'test'}
+              className="btn-primary flex items-center gap-1.5"
+            >
+              {telegramBusy === 'test' ? <Spinner className="w-4 h-4" /> : <Send className="w-4 h-4" />}
+              {telegramBusy === 'test' ? 'Sending…' : 'Send test message'}
+            </button>
+            <button
               onClick={refreshTelegram}
               disabled={telegramBusy === 'refresh'}
               className="btn-ghost border border-slate-200 flex items-center gap-1.5"
@@ -339,6 +378,28 @@ export default function Settings() {
                   I've pressed Start
                 </button>
               </div>
+            )}
+          </div>
+        )}
+
+        {telegramStatus && (
+          <div className="rounded-xl border border-slate-100 p-3 text-xs text-slate-500 space-y-1">
+            <p>
+              <span className="font-medium text-slate-600">Bot:</span>{' '}
+              {telegramStatus.botUsername ? `@${telegramStatus.botUsername}` : 'not reachable'}
+            </p>
+            <p>
+              <span className="font-medium text-slate-600">Commands:</span>{' '}
+              {telegramStatus.commands === 'enabled'
+                ? 'enabled — /status, /trips, /map and /stop work in the chat'
+                : 'disabled — the server has no public URL for Telegram'}
+            </p>
+            <p>
+              <span className="font-medium text-slate-600">Webhook:</span> {telegramStatus.webhook}
+              {telegramStatus.pendingUpdates > 0 ? ` · ${telegramStatus.pendingUpdates} queued` : ''}
+            </p>
+            {telegramStatus.lastError && (
+              <p className="text-amber-700">Telegram last error: {telegramStatus.lastError}</p>
             )}
           </div>
         )}

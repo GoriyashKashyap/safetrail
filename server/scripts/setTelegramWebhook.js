@@ -1,5 +1,11 @@
 import 'dotenv/config';
-import { getBotUsername, isTelegramConfigured, resolveWebhookUrl, setWebhook } from '../utils/telegram.js';
+import {
+  getBotUsername,
+  getWebhookSecret,
+  isTelegramConfigured,
+  resolveWebhookUrl,
+  setWebhook,
+} from '../utils/telegram.js';
 
 // Registers (or refreshes) the Telegram webhook that powers /status, /trips,
 // /map and /stop inside the bot chat. Run after deploying, and again whenever
@@ -18,10 +24,9 @@ const url = resolveWebhookUrl();
 
 if (!url) {
   console.error('✗ A public webhook URL cannot be derived.');
-  console.error('  Set SERVER_URL (e.g. https://safetrail-service.onrender.com) and');
-  console.error('  TELEGRAM_WEBHOOK_SECRET (any long random string) in server/.env,');
-  console.error('  then run this script again. On Render, RENDER_EXTERNAL_URL is used if');
-  console.error('  SERVER_URL is absent.');
+  console.error('  Set SERVER_URL (e.g. https://safetrail-service.onrender.com) in');
+  console.error('  server/.env, then run this script again. On Render, RENDER_EXTERNAL_URL');
+  console.error('  is used automatically, so this script is normally unnecessary there.');
   process.exit(1);
 }
 
@@ -36,7 +41,7 @@ console.log('  bot    :', `@${botUsername}`);
 console.log('  webhook:', url);
 console.log('');
 
-const result = await setWebhook(url, process.env.TELEGRAM_WEBHOOK_SECRET);
+const result = await setWebhook(url, getWebhookSecret());
 
 if (!result) {
   console.error('✗ Telegram rejected the webhook. HTTPS is required and the host must be reachable.');

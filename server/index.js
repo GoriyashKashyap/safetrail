@@ -31,16 +31,27 @@ if (process.env.NODE_ENV === 'production') {
 
 // ── CORS ──────────────────────────────────────────────────────────────────────
 // CLIENT_URL accepts a comma-separated list so one deployment can serve the
-// local Vite dev server and the hosted frontend at the same time.
+// local Vite dev server and the hosted frontend at the same time. Entries may
+// use a wildcard (e.g. https://*.vercel.app), which matters because Vercel
+// gives every deployment its own hostname.
 const allowedOrigins = (process.env.CLIENT_URL || 'http://localhost:5173')
   .split(',')
-  .map((origin) => origin.trim())
+  .map((origin) => origin.trim().replace(/\/+$/, ''))
   .filter(Boolean);
 
+const escapeRegex = (value) => value.replace(/[.+?^${}()|[\]\\]/g, '\\$&');
+
+const isAllowedOrigin = (origin) =>
+  allowedOrigins.some((allowed) => {
+    if (!allowed.includes('*')) return allowed === origin;
+    const pattern = new RegExp(`^${escapeRegex(allowed).replace(/\*/g, '.*')}$`);
+    return pattern.test(origin);
+  });
+
 // Requests without an Origin header (curl, Render health checks, server-side
-// callers) are always allowed; browser origins must be in the list.
+// callers) are always allowed; browser origins must match the list.
 const corsOrigin = (origin, callback) => {
-  if (!origin || allowedOrigins.includes(origin)) return callback(null, true);
+  if (!origin || isAllowedOrigin(origin)) return callback(null, true);
   console.warn(`[cors] blocked origin: ${origin}`);
   return callback(null, false);
 };

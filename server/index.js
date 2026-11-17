@@ -124,6 +124,9 @@ app.get('/favicon.ico', (req, res) => res.status(204).end());
 app.get('/api/health', (req, res) =>
   res.json({
     status: 'ok',
+    // Render sets RENDER_GIT_COMMIT, so a deploy can be confirmed instead of
+    // guessed at (a stale instance silently keeps serving the old code).
+    build: (process.env.RENDER_GIT_COMMIT || '').slice(0, 7) || 'development',
     email: isEmailConfigured() ? 'configured' : 'not-configured',
     telegram: isTelegramConfigured() ? 'configured' : 'not-configured',
     telegramCommands: resolveWebhookUrl() ? 'enabled' : 'no-public-url',

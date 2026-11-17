@@ -1,5 +1,6 @@
 import nodemailer from 'nodemailer';
 import telegram from './telegram.js';
+import { getAppUrl } from '../config/appUrl.js';
 
 export const getSmtpConfig = () => {
   const port = Number(process.env.SMTP_PORT || 587);
@@ -188,7 +189,7 @@ export const sendTestEmail = (to) =>
 
 // ── Verification email ──────────────────────────────────────────────────────
 export const sendVerificationEmail = async (user, token) => {
-  const verifyUrl = `${process.env.CLIENT_URL}/verify-email?token=${token}`;
+  const verifyUrl = `${getAppUrl()}/verify-email?token=${token}`;
   const html = emailWrapper(
     'Verify your SafeTrail email',
     `
@@ -228,7 +229,7 @@ export const sendVerificationEmail = async (user, token) => {
 
 // ── Password reset email ────────────────────────────────────────────────────
 export const sendPasswordResetEmail = async (user, token) => {
-  const resetUrl = `${process.env.CLIENT_URL}/reset-password?token=${token}`;
+  const resetUrl = `${getAppUrl()}/reset-password?token=${token}`;
   const html = emailWrapper(
     'Reset your SafeTrail password',
     `
@@ -267,7 +268,7 @@ export const sendPasswordResetEmail = async (user, token) => {
 
 // ── Guardian invite email ───────────────────────────────────────────────────
 export const sendGuardianInviteEmail = async ({ toEmail, toName, travellerName, token }) => {
-  const acceptUrl = `${process.env.CLIENT_URL}/accept-guardian?token=${token}`;
+  const acceptUrl = `${getAppUrl()}/accept-guardian?token=${token}`;
   const html = emailWrapper(
     `${travellerName} added you as a safety guardian`,
     `
@@ -312,7 +313,7 @@ export const sendGuardianInviteEmail = async ({ toEmail, toName, travellerName, 
 // ── SOS / Overdue alert email ───────────────────────────────────────────────
 export const sendAlertEmail = async ({ toEmail, toName, travellerName, type, trip, location }) => {
   const isSOS = type === 'sos';
-  const dashUrl = `${process.env.CLIENT_URL}/guardian/trip/${trip._id}`;
+  const dashUrl = `${getAppUrl()}/guardian/trip/${trip._id}`;
   const mapsUrl = location
     ? `https://www.google.com/maps?q=${location.lat},${location.lng}`
     : null;

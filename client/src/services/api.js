@@ -2,8 +2,20 @@ import axios from 'axios';
 
 export const TOKEN_KEY = 'safetrail.token';
 
+/**
+ * Origin of the API server.
+ * Empty in development: requests stay relative and the Vite proxy forwards
+ * them to localhost. In a deployed build set VITE_API_URL to the backend
+ * origin (e.g. https://safetrail-service.onrender.com) — a trailing "/api"
+ * is also accepted and stripped.
+ */
+export const SERVER_URL = (import.meta.env.VITE_API_URL || '')
+  .trim()
+  .replace(/\/+$/, '')
+  .replace(/\/api$/, '');
+
 const api = axios.create({
-  baseURL: '/api',
+  baseURL: SERVER_URL ? `${SERVER_URL}/api` : '/api',
   headers: { 'Content-Type': 'application/json' },
 });
 

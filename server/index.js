@@ -22,10 +22,26 @@ import telegramRoutes from './routes/telegram.js';
 const app = express();
 const httpServer = createServer(app);
 
+// ── CORS ──────────────────────────────────────────────────────────────────────
+// CLIENT_URL accepts a comma-separated list so one deployment can serve the
+// local Vite dev server and the hosted frontend at the same time.
+const allowedOrigins = (process.env.CLIENT_URL || 'http://localhost:5173')
+  .split(',')
+  .map((origin) => origin.trim())
+  .filter(Boolean);
+
+// Requests without an Origin header (curl, Render health checks, server-side
+// callers) are always allowed; browser origins must be in the list.
+const corsOrigin = (origin, callback) => {
+  if (!origin || allowedOrigins.includes(origin)) return callback(null, true);
+  console.warn(`[cors] blocked origin: ${origin}`);
+  return callback(null, false);
+};
+
 // ── Socket.io ─────────────────────────────────────────────────────────────────
 const io = new Server(httpServer, {
   cors: {
-    origin: process.env.CLIENT_URL || 'http://localhost:5173',
+    origin: corsOrigin,
     methods: ['GET', 'POST'],
     credentials: true,
   },
@@ -41,7 +57,7 @@ app.use(helmet({ contentSecurityPolicy: false }));
 
 app.use(
   cors({
-    origin: process.env.CLIENT_URL || 'http://localhost:5173',
+    origin: corsOrigin,
     credentials: true,
   })
 );
@@ -72,6 +88,20 @@ const authLimiter = rateLimit({
 });
 
 // ── Routes ────────────────────────────────────────────────────────────────────
+// Landing route: the API has no UI, so a bare visit to the deployed host would
+// otherwise return 404 and look like an outage.
+app.get('/', (req, res) =>
+  res.json({
+    service: 'SafeTrail API',
+    status: 'ok',
+    health: '/api/health',
+    endpoints: ['/api/auth', '/api/guardians', '/api/trips', '/api/telegram'],
+  })
+);
+
+// Browsers request this automatically; answer it so logs stay readable.
+app.get('/favicon.ico', (req, res) => res.status(204).end());
+
 app.get('/api/health', (req, res) =>
   res.json({
     status: 'ok',
@@ -79,6 +109,10 @@ app.get('/api/health', (req, res) =>
     timestamp: new Date().toISOString(),
   })
 );
+
+app.get('/api/test', (req, res) => {
+  res.json({ message: 'Test route works!' });
+});
 
 app.use('/api/auth', authLimiter, authRoutes);
 app.use('/api/guardians', guardianRoutes);
@@ -124,9 +158,5 @@ const start = async () => {
 start().catch((err) => {
   console.error('Failed to start server:', err);
   process.exit(1);
-});
-// ── Test route ────────────────────────────────────────────────────────────────────────
-app.get("/api/test", (req, res) => {
-  res.json({ message: "Test route works!" });
 });
 

@@ -4,12 +4,16 @@ export const TOKEN_KEY = 'safetrail.token';
 
 /**
  * Origin of the API server.
- * Empty in development: requests stay relative and the Vite proxy forwards
- * them to localhost. In a deployed build set VITE_API_URL to the backend
- * origin (e.g. https://safetrail-service.onrender.com) — a trailing "/api"
- * is also accepted and stripped.
+ * Development: empty, so requests stay relative and the Vite proxy forwards
+ * them to localhost. Production builds default to the deployed backend, so a
+ * hosting provider that forgets VITE_API_URL still reaches the real API.
+ * VITE_API_URL overrides both; a trailing "/api" is accepted and stripped.
  */
-export const SERVER_URL = (import.meta.env.VITE_API_URL || '')
+const PRODUCTION_API_ORIGIN = 'https://safetrail-service.onrender.com';
+
+export const SERVER_URL = (
+  import.meta.env.VITE_API_URL || (import.meta.env.PROD ? PRODUCTION_API_ORIGIN : '')
+)
   .trim()
   .replace(/\/+$/, '')
   .replace(/\/api$/, '');
